@@ -52,6 +52,11 @@ import ghidrassistmcp.tools.SetLocalVariableTypeTool;
 import ghidrassistmcp.tools.StructFieldXrefsTool;
 import ghidrassistmcp.tools.XrefsFromTool;
 import ghidrassistmcp.tools.XrefsToTool;
+import ghidrassistmcp.tools.WriteBytesTool;
+import ghidrassistmcp.tools.ClearCodeRangesTool;
+import ghidrassistmcp.tools.SetRegisterContextTool;
+import ghidrassistmcp.tools.RunScriptTool;
+import ghidrassistmcp.tools.PatchInstructionTool;
 import io.modelcontextprotocol.spec.McpSchema;
 
 /**
@@ -107,7 +112,14 @@ public class GhidrAssistMCPBackend implements McpBackend {
         registerTool(new CreateStructTool());
         registerTool(new ModifyStructTool());
         registerTool(new RenameStructureFieldTool());
-        
+
+        // New tools: memory/code manipulation, scripting, assembly
+        registerTool(new WriteBytesTool());
+        registerTool(new ClearCodeRangesTool());
+        registerTool(new SetRegisterContextTool());
+        registerTool(new RunScriptTool());
+        registerTool(new PatchInstructionTool());
+
         Msg.info(this, "GhidrAssistMCP Backend initialized with " + tools.size() + " tools");
     }
     
