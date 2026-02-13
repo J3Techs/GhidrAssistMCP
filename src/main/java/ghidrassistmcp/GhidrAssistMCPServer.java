@@ -198,6 +198,20 @@ public class GhidrAssistMCPServer {
             Msg.info(this, "GhidrAssistMCP Server stopped");
         }
     }
+
+    /**
+     * Check if the underlying Jetty server is running.
+     */
+    public boolean isRunning() {
+        return jettyServer != null && jettyServer.isRunning();
+    }
+
+    /**
+     * Get the current Jetty server state string for diagnostics.
+     */
+    public String getState() {
+        return jettyServer != null ? jettyServer.getState() : "null";
+    }
     
     public void setCurrentProgram(Program program) {
         backend.onProgramActivated(program);

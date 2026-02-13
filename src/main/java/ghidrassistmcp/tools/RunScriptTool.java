@@ -5,12 +5,13 @@ package ghidrassistmcp.tools;
 
 import java.io.File;
 import java.io.PrintWriter;
-import java.io.StringWriter;
+import java.io.Writer;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import javax.swing.SwingUtilities;
 
 import generic.jar.ResourceFile;
@@ -23,6 +24,7 @@ import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
+import ghidra.app.script.ScriptControls;
 import ghidrassistmcp.GhidrAssistMCPBackend;
 import ghidrassistmcp.GhidrAssistMCPPlugin;
 import ghidrassistmcp.McpTool;
@@ -34,6 +36,11 @@ import io.modelcontextprotocol.spec.McpSchema;
  * Supports both Java (.java) and Python (.py) scripts.
  */
 public class RunScriptTool implements McpTool {
+
+    private static final int DEFAULT_TIMEOUT_MINUTES = 10;
+    private static final int DEFAULT_MAX_OUTPUT_CHARS = 200_000;
+    private static final ReentrantLock SCRIPT_LOCK = new ReentrantLock();
+    private static volatile String activeScriptName = null;
 
     @Override
     public String getName() {
@@ -54,7 +61,10 @@ public class RunScriptTool implements McpTool {
             Map.of(
                 "script_name", new McpSchema.JsonSchema("string", null, null, null, null, null),
                 "script_path", new McpSchema.JsonSchema("string", null, null, null, null, null),
-                "script_args", new McpSchema.JsonSchema("string", null, null, null, null, null)
+                "script_args", new McpSchema.JsonSchema("string", null, null, null, null, null),
+                "timeout_minutes", new McpSchema.JsonSchema("integer", null, null, null, null, null),
+                "run_on_edt", new McpSchema.JsonSchema("boolean", null, null, null, null, null),
+                "max_output_chars", new McpSchema.JsonSchema("integer", null, null, null, null, null)
             ),
             List.of(), null, null, null);
     }
@@ -66,6 +76,26 @@ public class RunScriptTool implements McpTool {
             .addTextContent("This tool requires backend context for script execution. " +
                           "Please ensure the MCP server is properly connected.")
             .build();
+    }
+
+    @Override
+    public boolean isReadOnly() {
+        return false;
+    }
+
+    @Override
+    public boolean isDestructive() {
+        return true;
+    }
+
+    @Override
+    public boolean isIdempotent() {
+        return false;
+    }
+
+    @Override
+    public boolean isLongRunning() {
+        return true;
     }
 
     @Override
@@ -85,7 +115,10 @@ public class RunScriptTool implements McpTool {
         // Get parameters
         String scriptName = (String) arguments.get("script_name");
         String scriptPath = (String) arguments.get("script_path");
-        String scriptArgsStr = (String) arguments.get("script_args");
+        Object scriptArgsObj = arguments.get("script_args");
+        int timeoutMinutes = getIntArg(arguments, "timeout_minutes", DEFAULT_TIMEOUT_MINUTES);
+        boolean runOnEdt = getBooleanArg(arguments, "run_on_edt", true);
+        int maxOutputChars = getIntArg(arguments, "max_output_chars", DEFAULT_MAX_OUTPUT_CHARS);
 
         // Require at least one of script_name or script_path
         if ((scriptName == null || scriptName.trim().isEmpty()) &&
@@ -95,14 +128,8 @@ public class RunScriptTool implements McpTool {
                 .build();
         }
 
-        // Parse script arguments
-        String[] scriptArgs = new String[0];
-        if (scriptArgsStr != null && !scriptArgsStr.trim().isEmpty()) {
-            scriptArgs = scriptArgsStr.split(",");
-            for (int i = 0; i < scriptArgs.length; i++) {
-                scriptArgs[i] = scriptArgs[i].trim();
-            }
-        }
+        // Parse script arguments (string or list)
+        String[] scriptArgs = parseScriptArgs(scriptArgsObj);
 
         // Resolve script file
         ResourceFile scriptFile;
@@ -129,17 +156,31 @@ public class RunScriptTool implements McpTool {
                 .build();
         }
 
-        // Capture output
-        StringWriter outputWriter = new StringWriter();
-        StringWriter errorWriter = new StringWriter();
-        PrintWriter output = new PrintWriter(outputWriter);
-        PrintWriter error = new PrintWriter(errorWriter);
+        // Prevent concurrent script execution
+        if (!SCRIPT_LOCK.tryLock()) {
+            String running = activeScriptName != null ? activeScriptName : "unknown";
+            return McpSchema.CallToolResult.builder()
+                .addTextContent("Another script is already running: " + running +
+                    "\nCancel the running task or wait for completion before starting a new script.")
+                .build();
+        }
 
         String scriptFilename = scriptFile.getName();
         boolean success = false;
         Exception scriptException = null;
+        LimitedWriter outputWriter = null;
+        LimitedWriter errorWriter = null;
 
         try {
+            activeScriptName = scriptFilename;
+
+            // Capture output with size limits
+            int outLimit = maxOutputChars > 0 ? maxOutputChars : DEFAULT_MAX_OUTPUT_CHARS;
+            outputWriter = new LimitedWriter(outLimit);
+            errorWriter = new LimitedWriter(outLimit);
+            PrintWriter output = new PrintWriter(outputWriter, true);
+            PrintWriter error = new PrintWriter(errorWriter, true);
+
             // Get script provider for this script type
             GhidraScriptProvider provider = GhidraScriptUtil.getProvider(scriptFile);
             if (provider == null) {
@@ -173,16 +214,18 @@ public class RunScriptTool implements McpTool {
                 null  // highlight
             );
 
-            // Initialize script with state
-            script.set(state, TaskMonitor.DUMMY, output);
+            // Create ScriptControls with output/error writers and task monitor
+            ScriptControls controls = new ScriptControls(output, error, TaskMonitor.DUMMY);
+
+            // Initialize script with state using new API
+            script.set(state, controls);
 
             // Set script arguments if provided
             if (scriptArgs.length > 0) {
                 script.setScriptArgs(scriptArgs);
             }
 
-            // Execute script within a transaction on the Swing EDT to ensure synchronous completion
-            // Use a latch to wait for completion since Ghidra scripts must run on EDT
+            // Execute script (optionally on EDT). Use a latch to wait for completion.
             final CountDownLatch completionLatch = new CountDownLatch(1);
             final AtomicReference<Exception> scriptError = new AtomicReference<>();
             final AtomicReference<Boolean> scriptSuccess = new AtomicReference<>(false);
@@ -190,15 +233,15 @@ public class RunScriptTool implements McpTool {
             // Capture these for use in the Runnable
             final GhidraScript finalScript = script;
             final GhidraState finalState = state;
-            final PrintWriter finalOutput = output;
+            final ScriptControls finalControls = controls;
             final String finalScriptFilename = scriptFilename;
             final Program finalProgram = currentProgram;
 
             Runnable scriptRunner = () -> {
                 int transactionID = finalProgram.startTransaction("Run Script: " + finalScriptFilename);
                 try {
-                    // Use execute() method which is public, unlike run() which is protected
-                    finalScript.execute(finalState, TaskMonitor.DUMMY, finalOutput);
+                    // Use execute() with ScriptControls (new non-deprecated API)
+                    finalScript.execute(finalState, finalControls);
                     finalProgram.endTransaction(transactionID, true);
                     scriptSuccess.set(true);
                 } catch (Exception e) {
@@ -210,22 +253,31 @@ public class RunScriptTool implements McpTool {
                 }
             };
 
-            // Run on EDT and wait for completion
-            if (SwingUtilities.isEventDispatchThread()) {
-                // Already on EDT, run directly
-                scriptRunner.run();
-            } else {
-                // Schedule on EDT and wait
-                SwingUtilities.invokeLater(scriptRunner);
-                try {
-                    // Wait up to 10 minutes for script completion
-                    if (!completionLatch.await(10, TimeUnit.MINUTES)) {
-                        scriptException = new RuntimeException("Script execution timed out after 10 minutes");
+            if (runOnEdt) {
+                if (SwingUtilities.isEventDispatchThread()) {
+                    // Already on EDT, run directly
+                    scriptRunner.run();
+                } else {
+                    // Schedule on EDT and wait
+                    SwingUtilities.invokeLater(scriptRunner);
+                    try {
+                        // Wait up to configured timeout for script completion
+                        if (timeoutMinutes > 0) {
+                            if (!completionLatch.await(timeoutMinutes, TimeUnit.MINUTES)) {
+                                scriptException = new RuntimeException(
+                                    "Script execution timed out after " + timeoutMinutes + " minutes");
+                            }
+                        } else {
+                            completionLatch.await();
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        scriptException = e;
                     }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    scriptException = e;
                 }
+            } else {
+                // Run off the EDT to avoid UI lockups
+                scriptRunner.run();
             }
 
             // Get results from atomic references
@@ -237,6 +289,10 @@ public class RunScriptTool implements McpTool {
         } catch (Exception e) {
             scriptException = e;
             Msg.error(this, "Script setup failed: " + e.getMessage(), e);
+        }
+        finally {
+            activeScriptName = null;
+            SCRIPT_LOCK.unlock();
         }
 
         // Build result
@@ -250,14 +306,19 @@ public class RunScriptTool implements McpTool {
         }
         result.append("Status: ").append(success ? "SUCCESS" : "FAILED").append("\n\n");
 
-        String stdout = outputWriter.toString();
-        String stderr = errorWriter.toString();
+        String stdout = outputWriter != null ? outputWriter.getValue() : "";
+        String stderr = errorWriter != null ? errorWriter.getValue() : "";
+        boolean outTruncated = outputWriter != null && outputWriter.isTruncated();
+        boolean errTruncated = errorWriter != null && errorWriter.isTruncated();
 
         if (!stdout.isEmpty()) {
             result.append("=== Output ===\n");
             result.append(stdout);
             if (!stdout.endsWith("\n")) {
                 result.append("\n");
+            }
+            if (outTruncated) {
+                result.append("[output truncated]\n");
             }
             result.append("\n");
         }
@@ -267,6 +328,9 @@ public class RunScriptTool implements McpTool {
             result.append(stderr);
             if (!stderr.endsWith("\n")) {
                 result.append("\n");
+            }
+            if (errTruncated) {
+                result.append("[error output truncated]\n");
             }
             result.append("\n");
         }
@@ -340,5 +404,127 @@ public class RunScriptTool implements McpTool {
         }
 
         throw new IllegalArgumentException("Either script_name or script_path must be provided");
+    }
+
+    private static int getIntArg(Map<String, Object> arguments, String key, int defaultValue) {
+        Object val = arguments.get(key);
+        if (val instanceof Number) {
+            return ((Number) val).intValue();
+        }
+        if (val instanceof String s) {
+            try {
+                return Integer.parseInt(s.trim());
+            } catch (NumberFormatException e) {
+                return defaultValue;
+            }
+        }
+        return defaultValue;
+    }
+
+    private static boolean getBooleanArg(Map<String, Object> arguments, String key, boolean defaultValue) {
+        Object val = arguments.get(key);
+        if (val instanceof Boolean) {
+            return (Boolean) val;
+        }
+        if (val instanceof String s) {
+            return Boolean.parseBoolean(s.trim());
+        }
+        return defaultValue;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String[] parseScriptArgs(Object scriptArgsObj) {
+        if (scriptArgsObj == null) {
+            return new String[0];
+        }
+        if (scriptArgsObj instanceof List<?> list) {
+            return list.stream().map(Object::toString).toArray(String[]::new);
+        }
+        if (scriptArgsObj instanceof String s) {
+            if (s.trim().isEmpty()) {
+                return new String[0];
+            }
+            String[] parts = s.split(",");
+            for (int i = 0; i < parts.length; i++) {
+                parts[i] = parts[i].trim();
+            }
+            return parts;
+        }
+        return new String[] { scriptArgsObj.toString() };
+    }
+
+    private static final class LimitedWriter extends Writer {
+        private final int maxChars;
+        private final StringBuilder sb = new StringBuilder();
+        private boolean truncated = false;
+
+        private LimitedWriter(int maxChars) {
+            this.maxChars = Math.max(1024, maxChars);
+        }
+
+        @Override
+        public void write(char[] cbuf, int off, int len) {
+            if (truncated || len <= 0) {
+                return;
+            }
+            int remaining = maxChars - sb.length();
+            if (remaining <= 0) {
+                truncated = true;
+                return;
+            }
+            int toWrite = Math.min(len, remaining);
+            sb.append(cbuf, off, toWrite);
+            if (toWrite < len) {
+                truncated = true;
+            }
+        }
+
+        @Override
+        public void write(String str, int off, int len) {
+            if (str == null || truncated || len <= 0) {
+                return;
+            }
+            int remaining = maxChars - sb.length();
+            if (remaining <= 0) {
+                truncated = true;
+                return;
+            }
+            int toWrite = Math.min(len, remaining);
+            sb.append(str, off, off + toWrite);
+            if (toWrite < len) {
+                truncated = true;
+            }
+        }
+
+        @Override
+        public void write(int c) {
+            if (truncated) {
+                return;
+            }
+            int remaining = maxChars - sb.length();
+            if (remaining <= 0) {
+                truncated = true;
+                return;
+            }
+            sb.append((char) c);
+        }
+
+        @Override
+        public void flush() {
+            // no-op
+        }
+
+        @Override
+        public void close() {
+            // no-op
+        }
+
+        public String getValue() {
+            return sb.toString();
+        }
+
+        public boolean isTruncated() {
+            return truncated;
+        }
     }
 }

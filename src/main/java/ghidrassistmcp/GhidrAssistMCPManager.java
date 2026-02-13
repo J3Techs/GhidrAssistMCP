@@ -304,7 +304,7 @@ public class GhidrAssistMCPManager {
      * Check if the server is running.
      */
     public boolean isServerRunning() {
-        return server != null;
+        return server != null && server.isRunning();
     }
 
     /**
@@ -339,6 +339,10 @@ public class GhidrAssistMCPManager {
             if (serverEnabled) {
                 startServer();
             }
+        }
+        else if (serverEnabled && (server == null || !server.isRunning())) {
+            // Recover from unexpected server stop/crash
+            startServer();
         }
 
         if (provider != null) {
@@ -399,8 +403,12 @@ public class GhidrAssistMCPManager {
         }
 
         if (server != null) {
-            Msg.info(this, "Server already running");
-            return;
+            if (server.isRunning()) {
+                Msg.info(this, "Server already running");
+                return;
+            }
+            Msg.warn(this, "Server object exists but is not running (state=" + server.getState() + "), restarting");
+            stopServer();
         }
 
         try {
