@@ -10,7 +10,7 @@ GhidrAssistMCP bridges the gap between AI-powered analysis tools and Ghidra's co
 
 - **MCP Server Integration**: Full Model Context Protocol server implementation using official SDK
 - **Dual HTTP Transports**: Supports SSE and Streamable HTTP transports for maximum client compatibility
-- **34 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
+- **39 Built-in Tools**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs (includes 5 custom tools from J3Techs fork)
 - **5 MCP Resources**: Static data resources for program info, functions, strings, imports, and exports
 - **5 MCP Prompts**: Pre-built analysis prompts for common reverse engineering tasks
 - **Result Caching**: Intelligent caching system to improve performance for repeated queries
@@ -98,14 +98,14 @@ Shameless self-promotion: [GhidrAssist](https://github.com/jtang613/GhidrAssist)
 
 The Configuration tab allows you to:
 
-- **View all available tools** (34 total)
+- **View all available tools** (39 total)
 - **Enable/disable individual tools** using checkboxes
 - **Save configuration** to persist across sessions
 - **Monitor tool status** in real-time
 
 ## Available Tools
 
-GhidrAssistMCP provides 34 tools organized into categories. Several tools use an action-based API pattern where a single tool provides multiple related operations.
+GhidrAssistMCP provides 39 tools organized into categories (including 5 custom tools -- see [Custom Changes](#custom-changes-j3techs-fork)). Several tools use an action-based API pattern where a single tool provides multiple related operations.
 
 ### Program & Data Listing
 
@@ -482,11 +482,12 @@ GhidrAssistMCP/
 │   ├── DocumentFunctionPrompt.java
 │   ├── TraceDataFlowPrompt.java
 │   └── TraceNetworkDataPrompt.java
-└── tools/                    # MCP Tools (34 total)
+└── tools/                    # MCP Tools (39 total)
     ├── Consolidated action-based tools
     ├── Analysis tools
     ├── Modification tools
-    └── Navigation tools
+    ├── Navigation tools
+    └── Custom tools (write_bytes, clear_code_ranges, set_register_context, run_script, patch_instruction)
 ```
 
 ### Tool Design Patterns
@@ -539,7 +540,7 @@ src/main/java/ghidrassistmcp/
 ├── tasks/                         # Async task system
 ├── resources/                     # MCP resources
 ├── prompts/                       # MCP prompts
-└── tools/                         # Tool implementations (34 files)
+└── tools/                         # Tool implementations (39 files)
 ```
 
 ### Adding New Tools
@@ -690,6 +691,197 @@ Enable debug logging by adding to Ghidra startup:
 - **Thread safety** for UI operations
 - **Comprehensive documentation** for public APIs
 - **Action-based consolidation** for related tool operations
+
+## Custom Changes (J3Techs Fork)
+
+This fork (`J3Techs/GhidrAssistMCP`) extends the upstream with **5 new custom tools**, an **enhanced `list_functions` tool**, and **server hardening**. Total tool count: **39**.
+
+### New Custom Tools
+
+#### `write_bytes` - Raw Memory Write
+
+Write raw bytes directly to program memory. Useful for manual patching and data injection.
+
+| Parameter | Required | Description |
+| --------- | -------- | ----------- |
+| `address` | Yes | Target address (e.g., `0x00401000`) |
+| `data_hex` | Yes | Hex string to write (supports `0x` prefix and whitespace) |
+| `dry_run` | No | Validate without writing (default `false`) |
+
+- SHA256 hash reported for all writes
+- Memory block permission checking
+- Max write size: 1 MB
+- Transaction-based for safe rollback on failure
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "write_bytes",
+    "arguments": {
+      "address": "0x00401000",
+      "data_hex": "90 90 90 90",
+      "dry_run": true
+    }
+  }
+}
+```
+
+#### `clear_code_ranges` - Clear Functions/Instructions/Data in Ranges
+
+Clear functions, instructions, and/or data in specified address ranges. Essential for re-analysis workflows and cleaning up incorrect auto-analysis.
+
+| Parameter | Required | Description |
+| --------- | -------- | ----------- |
+| `ranges` | Yes | Comma-separated `start-end` pairs (e.g., `0x1000-0x2000,0x3000-0x4000`) |
+| `clear_functions` | No | Clear function definitions (default `true`) |
+| `clear_instructions` | No | Clear disassembled instructions (default `true`) |
+| `clear_data` | No | Clear defined data (default `true`) |
+| `dry_run` | No | Report what would be cleared without making changes (default `false`) |
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "clear_code_ranges",
+    "arguments": {
+      "ranges": "0x80000000-0x80001000",
+      "clear_functions": true,
+      "clear_instructions": true,
+      "clear_data": false,
+      "dry_run": true
+    }
+  }
+}
+```
+
+#### `set_register_context` - Set Processor Register Context
+
+Set processor register context values over address ranges. Critical for architectures like **TriCore** where segment registers (A0, A1, A8, A9) affect addressing modes and data pointer resolution.
+
+| Parameter | Required | Description |
+| --------- | -------- | ----------- |
+| `register` | Yes | Register name (case-insensitive lookup) |
+| `value` | Yes | Value in hex (`0x` prefix) or decimal |
+| `ranges` | Yes | Comma-separated `start-end` address pairs |
+| `mode` | No | `overwrite` (default), `set_if_unset`, or `merge` (bitwise OR with existing) |
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "set_register_context",
+    "arguments": {
+      "register": "A0",
+      "value": "0xD0000000",
+      "ranges": "0x80000000-0x80100000",
+      "mode": "overwrite"
+    }
+  }
+}
+```
+
+#### `run_script` - Execute GhidraScripts
+
+Execute Java (`.java`) or Python (`.py`) GhidraScripts programmatically with full output capture. Searches Ghidra script directories automatically.
+
+| Parameter | Required | Description |
+| --------- | -------- | ----------- |
+| `script_name` | No* | Script name (searched in Ghidra script dirs, auto-appends `.java`/`.py`) |
+| `script_path` | No* | Absolute path to script file |
+| `script_args` | No | Comma-separated arguments or JSON array |
+| `run_on_edt` | No | Run on Event Dispatch Thread for safe GUI operations (default `true`) |
+| `timeout_minutes` | No | Execution timeout (default `10`) |
+| `max_output_chars` | No | Max captured output size (default `200000`) |
+
+*One of `script_name` or `script_path` is required.
+
+- Concurrent execution prevention (one script at a time)
+- Output size limiting via `LimitedWriter`
+- Captures both stdout and stderr
+- Transaction-wrapped for safe program modifications
+- Marked as `isLongRunning()` -- executes asynchronously with task management
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "run_script",
+    "arguments": {
+      "script_name": "AnalyzeHeadlessPostScript",
+      "script_args": "arg1,arg2",
+      "timeout_minutes": 5
+    }
+  }
+}
+```
+
+#### `patch_instruction` - Assemble and Patch Instructions
+
+Assemble and patch instructions at a specified address, equivalent to Ghidra's `Ctrl+Shift+G` functionality. Supports multi-line assembly.
+
+| Parameter | Required | Description |
+| --------- | -------- | ----------- |
+| `address` | No | Target address (falls back to cursor position if omitted) |
+| `instruction` | No | Assembly code (multi-line via `;` or newlines). Omit to inspect current instruction. |
+| `dry_run` | No | Validate assembly without patching (default `false`) |
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "patch_instruction",
+    "arguments": {
+      "address": "0x00401000",
+      "instruction": "NOP; NOP; NOP",
+      "dry_run": false
+    }
+  }
+}
+```
+
+### Enhanced `list_functions` - Wildcard/Glob and Match Modes
+
+The `list_functions` tool now supports multiple matching strategies beyond simple substring search:
+
+| Parameter | Required | Description |
+| --------- | -------- | ----------- |
+| `pattern` | No | Filter pattern |
+| `match_mode` | No | `auto` (default), `contains`, `wildcard`, `regex`, `starts_with`, `ends_with` |
+| `case_sensitive` | No | Case-sensitive matching (default `true`) |
+| `offset` | No | Pagination offset (default `0`) |
+| `limit` | No | Max results (default `100`) |
+
+**Match modes:**
+
+- **`auto`** (default): Uses `wildcard` if pattern contains `*` or `?`, otherwise `contains`
+- **`contains`**: Substring match
+- **`wildcard`**: Glob pattern (`*` = any chars, `?` = single char)
+- **`regex`**: Full Java regex
+- **`starts_with`**: Prefix match
+- **`ends_with`**: Suffix match
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "list_functions",
+    "arguments": {
+      "pattern": "FUN_8000*",
+      "match_mode": "auto",
+      "case_sensitive": false,
+      "limit": 50
+    }
+  }
+}
+```
+
+### Server Hardening
+
+- MCP server and `RunScriptTool` hardened for safer operation
+- Concurrent script execution prevention with `ReentrantLock`
+- Output size limiting to prevent memory exhaustion
+- Transaction safety on all write operations
 
 ## License
 
