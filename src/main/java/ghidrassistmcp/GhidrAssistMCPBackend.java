@@ -51,6 +51,7 @@ import ghidrassistmcp.tools.ListImportsTool;
 import ghidrassistmcp.tools.ListNamespacesTool;
 import ghidrassistmcp.tools.ListRelocationsTool;
 import ghidrassistmcp.tools.ListSegmentsTool;
+import ghidrassistmcp.tools.CreateMemoryBlockTool;
 import ghidrassistmcp.tools.ListStringsTool;
 import ghidrassistmcp.tools.ListTasksTool;
 import ghidrassistmcp.tools.ProgramInfoTool;
@@ -68,6 +69,12 @@ import ghidrassistmcp.tools.ClearCodeRangesTool;
 import ghidrassistmcp.tools.SetRegisterContextTool;
 import ghidrassistmcp.tools.RunScriptTool;
 import ghidrassistmcp.tools.PatchInstructionTool;
+import ghidrassistmcp.tools.ExportFunctionSignaturesTool;
+import ghidrassistmcp.tools.FunctionByteMatcherTool;
+import ghidrassistmcp.tools.StringAnchorMatcherTool;
+import ghidrassistmcp.tools.BulkTransferLabelsTool;
+import ghidrassistmcp.tools.CreateFunctionsAtAddressesTool;
+import ghidrassistmcp.tools.BulkRegionTransferTool;
 import io.modelcontextprotocol.spec.McpSchema;
 
 /**
@@ -105,6 +112,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
         registerTool(new ListFunctionsTool());
         registerTool(new GetFunctionInfoTool());
         registerTool(new ListSegmentsTool());
+        registerTool(new CreateMemoryBlockTool());
         registerTool(new ListImportsTool());
         registerTool(new ListExportsTool());
         registerTool(new ListStringsTool());
@@ -146,6 +154,14 @@ public class GhidrAssistMCPBackend implements McpBackend {
         registerTool(new SetRegisterContextTool());
         registerTool(new RunScriptTool());
         registerTool(new PatchInstructionTool());
+
+        // Cross-binary analysis tools: function matching and label transfer
+        registerTool(new ExportFunctionSignaturesTool());
+        registerTool(new FunctionByteMatcherTool());
+        registerTool(new StringAnchorMatcherTool());
+        registerTool(new BulkTransferLabelsTool());
+        registerTool(new CreateFunctionsAtAddressesTool());
+        registerTool(new BulkRegionTransferTool());
 
         Msg.info(this, "GhidrAssistMCP Backend initialized with " + tools.size() + " tools");
     }

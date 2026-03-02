@@ -27,6 +27,7 @@ import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 import ghidrassistmcp.prompts.McpPrompt;
 import ghidrassistmcp.resources.McpResource;
+import ghidrassistmcp.transport.LenientStreamableTransportServlet;
 
 /**
  * Refactored MCP Server implementation that uses the backend architecture.
@@ -136,11 +137,14 @@ public class GhidrAssistMCPServer {
                 context.addServlet(mcpSseServletHolder, "/sse");
                 context.addServlet(mcpSseServletHolder, messageEndpoint);
 
-                ServletHolder mcpStreamableServletHolder = new ServletHolder("mcp-streamable-transport", streamableTransportProvider);
+                LenientStreamableTransportServlet lenientStreamableServlet =
+                    new LenientStreamableTransportServlet(streamableTransportProvider, mcpEndpoint);
+                ServletHolder mcpStreamableServletHolder = new ServletHolder("mcp-streamable-transport", lenientStreamableServlet);
                 mcpStreamableServletHolder.setAsyncSupported(true);
+                context.addServlet(mcpStreamableServletHolder, "/mcp");
                 context.addServlet(mcpStreamableServletHolder, "/mcp/*");
-                Msg.info(this, "Registered MCP SSE servlet mapping: /*");
-                Msg.info(this, "Registered MCP Streamable servlet mapping: /mcp/*");
+                Msg.info(this, "Registered MCP SSE servlet mapping: /sse and " + messageEndpoint);
+                Msg.info(this, "Registered MCP Streamable servlet mapping: /mcp and /mcp/*");
                 
                 // Log configuration
                 Msg.info(this, "Transport provider class: " + sseTransportProvider.getClass().getName());
@@ -327,3 +331,6 @@ public class GhidrAssistMCPServer {
         }
     }
 }
+
+
+
