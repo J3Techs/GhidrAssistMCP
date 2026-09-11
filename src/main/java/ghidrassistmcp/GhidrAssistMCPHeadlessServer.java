@@ -198,6 +198,7 @@ public class GhidrAssistMCPHeadlessServer {
             setToolEnabled("open_program", false);
             setToolEnabled("close_program", false);
             setToolEnabled("project_files", false);
+            setToolEnabled("project_repository", false);
             setToolEnabled("get_current_address", false);
             setToolEnabled("get_current_function", false);
         }

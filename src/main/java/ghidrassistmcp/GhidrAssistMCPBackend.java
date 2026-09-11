@@ -191,6 +191,17 @@ public class GhidrAssistMCPBackend implements McpBackend {
         registerTool(new OpenProgramTool());          // open_program: open/list project files in CodeBrowser
         registerTool(new CloseProgramTool());         // close_program: close open programs in CodeBrowser
         registerTool(new ProjectFilesTool());         // project_files: list/delete project files and folders
+        registerTool(new ghidrassistmcp.tools.SaveProgramTool());
+        registerTool(new ghidrassistmcp.tools.ProjectRepositoryTool());
+        registerTool(new ghidrassistmcp.tools.QueryAddressContextBatchTool());
+        registerTool(new ghidrassistmcp.tools.SearchSymbolsBatchTool());
+        registerTool(new ghidrassistmcp.tools.ReadMemoryBatchTool());
+        registerTool(new ghidrassistmcp.tools.ReadMemoryTableTool());
+        registerTool(new ghidrassistmcp.tools.XrefsBatchTool());
+        registerTool(new ghidrassistmcp.tools.FunctionInventoryTool());
+        registerTool(new ghidrassistmcp.tools.ScanInstructionsTool());
+        registerTool(new ghidrassistmcp.tools.ScanFunctionCandidatesTool());
+        registerTool(new ghidrassistmcp.tools.GetRegisterContextTool());
         registerTool(new AssembleCodeTool());         // assemble_code: assemble instructions and optionally patch bytes
         registerTool(new PatchBytesTool());           // patch_bytes: write patched bytes into program memory
 
@@ -864,14 +875,15 @@ public class GhidrAssistMCPBackend implements McpBackend {
 
             // Build new result with enhanced content
             McpSchema.CallToolResult.Builder builder = McpSchema.CallToolResult.builder()
+                .isError(result.isError())
                 .addTextContent(enhancedText);
+            if (result.structuredContent() != null) builder.structuredContent(result.structuredContent());
+            if (result.meta() != null) builder.meta(result.meta());
 
             // Add remaining content items if any
             for (int i = 1; i < result.content().size(); i++) {
                 var content = result.content().get(i);
-                if (content instanceof McpSchema.TextContent) {
-                    builder.addTextContent(((McpSchema.TextContent) content).text());
-                }
+                builder.addContent(content);
             }
 
             return builder.build();

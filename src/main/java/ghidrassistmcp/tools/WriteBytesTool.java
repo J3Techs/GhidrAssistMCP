@@ -21,6 +21,8 @@ import io.modelcontextprotocol.spec.McpSchema;
  * Supports dry_run mode to validate without writing.
  */
 public class WriteBytesTool implements McpTool {
+    @Override public boolean isReadOnly() { return false; }
+    @Override public boolean isDestructive() { return true; }
 
     @Override
     public String getName() {

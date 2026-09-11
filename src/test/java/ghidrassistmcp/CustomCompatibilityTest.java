@@ -43,6 +43,31 @@ class CustomCompatibilityTest {
     }
 
     @Test
+    void everyUpstreamEndpointRemainsRegistered() throws Exception {
+        var names = backend.getAllTools().stream().map(McpSchema.Tool::name).collect(Collectors.toSet());
+        try (var stream = getClass().getResourceAsStream("/upstream-2.11-tool-names.txt")) {
+            assertNotNull(stream);
+            for (String name : new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).split("\\R")) {
+                if (!name.isBlank() && !name.startsWith("#")) assertTrue(names.contains(name), "Missing upstream endpoint: " + name);
+            }
+        }
+        Set<String> additions = Set.of("save_program", "project_repository", "query_address_context_batch",
+            "search_symbols_batch", "read_memory_batch", "read_memory_table", "xrefs_batch",
+            "function_inventory", "scan_instructions", "scan_function_candidates", "get_register_context");
+        assertTrue(names.containsAll(additions));
+        assertEquals(94, names.size());
+    }
+
+    @Test
+    void legacyMutatorsAreAdvertisedAsMutating() {
+        var tools = backend.getAvailableTools().stream().collect(Collectors.toMap(McpSchema.Tool::name, tool -> tool));
+        for (String name : Set.of("write_bytes", "clear_code_ranges", "patch_instruction", "set_register_context",
+                "save_program", "project_files", "project_repository", "bulk_transfer_labels")) {
+            assertEquals(false, tools.get(name).annotations().readOnlyHint(), name);
+        }
+    }
+
+    @Test
     void disablingEitherNameDisablesBothDiscoveryAndExecution() {
         backend.setToolEnabled("get_functions", false);
         assertFalse(backend.isToolEnabled("list_functions"));
@@ -75,5 +100,21 @@ class CustomCompatibilityTest {
         backend.unregisterTool("get_functions");
         assertFalse(backend.getAllTools().stream().anyMatch(t ->
             Set.of("get_functions", "list_functions").contains(t.name())));
+    }
+
+    @Test
+    void contextDecorationPreservesStructuredErrors() {
+        backend.registerTool(new McpTool() {
+            public String getName() { return "structured_error_test"; }
+            public String getDescription() { return "test"; }
+            public McpSchema.JsonSchema getInputSchema() { return null; }
+            public McpSchema.CallToolResult execute(Map<String, Object> args, ghidra.program.model.listing.Program program) {
+                return McpSchema.CallToolResult.builder().isError(true).structuredContent(Map.of("reason", "busy"))
+                    .addTextContent("Busy").build();
+            }
+        });
+        var result = backend.callTool("structured_error_test", Map.of());
+        assertTrue(result.isError());
+        assertEquals(Map.of("reason", "busy"), result.structuredContent());
     }
 }

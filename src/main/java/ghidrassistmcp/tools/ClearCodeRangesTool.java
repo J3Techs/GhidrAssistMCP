@@ -25,6 +25,8 @@ import io.modelcontextprotocol.spec.McpSchema;
  * Useful for re-analysis workflows and cleaning up incorrect auto-analysis.
  */
 public class ClearCodeRangesTool implements McpTool {
+    @Override public boolean isReadOnly() { return false; }
+    @Override public boolean isDestructive() { return true; }
 
     @Override
     public String getName() {

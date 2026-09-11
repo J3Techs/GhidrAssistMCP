@@ -26,6 +26,8 @@ import io.modelcontextprotocol.spec.McpSchema;
  * Can show current instruction or assemble and patch new instructions.
  */
 public class PatchInstructionTool implements McpTool {
+    @Override public boolean isReadOnly() { return false; }
+    @Override public boolean isDestructive() { return true; }
 
     @Override
     public String getName() {

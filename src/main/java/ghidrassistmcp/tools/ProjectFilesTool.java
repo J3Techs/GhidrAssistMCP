@@ -4,18 +4,24 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
+import ghidra.util.task.TaskMonitor;
+import ghidrassistmcp.tasks.McpTask;
+import ghidrassistmcp.tasks.McpTaskMonitor;
 
 import ghidra.framework.model.DomainFile;
 import ghidra.framework.model.DomainFolder;
 import ghidra.framework.model.Project;
-import ghidra.framework.plugintool.PluginTool;
 import ghidra.util.Msg;
 import ghidrassistmcp.GhidrAssistMCPBackend;
-import ghidrassistmcp.GhidrAssistMCPManager;
 import ghidrassistmcp.McpTool;
 import io.modelcontextprotocol.spec.McpSchema;
 
 public class ProjectFilesTool implements McpTool {
+    private final Supplier<Project> projects;
+    public ProjectFilesTool() { this(ProjectToolSupport::activeProject); }
+    ProjectFilesTool(Supplier<Project> projects) { this.projects = projects; }
+    @Override public boolean isLongRunning() { return true; }
 
     @Override
     public String getName() {
@@ -24,7 +30,8 @@ public class ProjectFilesTool implements McpTool {
 
     @Override
     public String getDescription() {
-        return "List or delete files/folders in the active Ghidra project. " +
+        return "List, create_folder, copy, move, rename or delete files/folders in the active Ghidra project. " +
+            "Copy/move use destination_folder; rename uses name. New mutations support dry_run and never overwrite entries. " +
             "Deletion requires confirm=true and removes Ghidra project database entries, not original imported files.";
     }
 
@@ -50,12 +57,15 @@ public class ProjectFilesTool implements McpTool {
                 Map.entry("action", Map.of(
                     "type", "string",
                     "description", "Operation to perform",
-                    "enum", List.of("list", "delete")
+                    "enum", List.of("list", "delete", "create_folder", "copy", "move", "rename")
                 )),
                 Map.entry("path", Map.of(
                     "type", "string",
-                    "description", "Project path for action='delete' (e.g. '/banks/bank00.bin' or '/banks')"
+                    "description", "Exact project source path, or full new folder path for create_folder"
                 )),
+                Map.entry("destination_folder", Map.of("type", "string", "description", "Existing project folder for copy/move")),
+                Map.entry("name", Map.of("type", "string", "description", "New leaf name for rename")),
+                Map.entry("dry_run", Map.of("type", "boolean", "default", false)),
                 Map.entry("folder", Map.of(
                     "type", "string",
                     "description", "Project folder to list. Default: '/'"
@@ -88,6 +98,17 @@ public class ProjectFilesTool implements McpTool {
     public McpSchema.CallToolResult execute(Map<String, Object> arguments,
                                             ghidra.program.model.listing.Program currentProgram,
                                             GhidrAssistMCPBackend backend) {
+        return perform(arguments, backend, TaskMonitor.DUMMY);
+    }
+
+    @Override
+    public McpSchema.CallToolResult execute(Map<String, Object> arguments,
+            ghidra.program.model.listing.Program currentProgram, GhidrAssistMCPBackend backend, McpTask task) {
+        return perform(arguments, backend, new McpTaskMonitor(task, 0, 100, "Project files"));
+    }
+
+    private McpSchema.CallToolResult perform(Map<String, Object> arguments,
+            GhidrAssistMCPBackend backend, TaskMonitor monitor) {
         Project project = getProject();
         if (project == null) {
             return textResult("No Ghidra project is open.");
@@ -95,21 +116,100 @@ public class ProjectFilesTool implements McpTool {
 
         String action = (String) arguments.get("action");
         if (action == null || action.isBlank()) {
-            return textResult("action is required: list or delete.");
+            return ProjectToolSupport.error("action is required: list, delete, create_folder, copy, move or rename.");
         }
 
         DomainFolder root = project.getProjectData().getRootFolder();
         return switch (action.trim().toLowerCase()) {
             case "list" -> list(root, arguments);
             case "delete" -> delete(root, arguments, backend);
-            default -> textResult("Invalid action: " + action + ". Use list or delete.");
+            case "create_folder", "copy", "move", "rename" -> manage(root, action.trim().toLowerCase(), arguments, backend, monitor);
+            default -> ProjectToolSupport.error("Invalid action: " + action);
         };
     }
 
     private Project getProject() {
-        GhidrAssistMCPManager manager = GhidrAssistMCPManager.getInstance();
-        PluginTool pluginTool = manager.getActiveTool();
-        return pluginTool != null ? pluginTool.getProject() : null;
+        return projects.get();
+    }
+
+    private McpSchema.CallToolResult manage(DomainFolder root, String action, Map<String, Object> args,
+                                           GhidrAssistMCPBackend backend, TaskMonitor monitor) {
+        try {
+            String path = ProjectToolSupport.path(ProjectToolSupport.required(args, "path"));
+            if (path.equals("/")) return ProjectToolSupport.error("Cannot mutate the project root");
+            DomainFile file = ProjectToolSupport.file(root, path);
+            DomainFolder folder = ProjectToolSupport.folder(root, path);
+            boolean preview = Boolean.TRUE.equals(args.get("dry_run"));
+            String name;
+            DomainFolder destination;
+            if (action.equals("create_folder")) {
+                int slash = path.lastIndexOf('/');
+                name = path.substring(slash + 1);
+                destination = ProjectToolSupport.folder(root, slash == 0 ? "/" : path.substring(0, slash));
+            } else {
+                if (file == null && folder == null) return ProjectToolSupport.error("Project entry not found: " + path);
+                if (action.equals("rename")) {
+                    name = ProjectToolSupport.required(args, "name");
+                    if (name.contains("/") || name.contains("\\") || name.equals(".") || name.equals("..")) {
+                        return ProjectToolSupport.error("name must be a single project entry name");
+                    }
+                    destination = file != null ? file.getParent() : folder.getParent();
+                } else {
+                    name = file != null ? file.getName() : folder.getName();
+                    destination = ProjectToolSupport.folder(root, ProjectToolSupport.required(args, "destination_folder"));
+                }
+            }
+            if (destination == null) return ProjectToolSupport.error("Destination folder does not exist");
+            if (destination.isLinked()) return ProjectToolSupport.error("Destination must be a local project folder");
+            if (destination.getFile(name) != null || destination.getFolder(name) != null) {
+                return ProjectToolSupport.error("Destination already exists; no overwrite performed");
+            }
+            if (folder != null && folder.isSameOrAncestor(destination)) {
+                return ProjectToolSupport.error("Cannot copy/move a folder into itself or a descendant");
+            }
+            if (file != null && (file.isBusy() || file.isChanged())) {
+                return ProjectToolSupport.error("Finish active work and save_program before moving/copying this file");
+            }
+            if (folder != null) ensureStable(folder, monitor);
+            String target = (destination.getPathname().equals("/") ? "" : destination.getPathname()) + "/" + name;
+            if (preview) return ProjectToolSupport.result(Map.of("action", action, "source", path,
+                "destination", target, "dry_run", true));
+            String result;
+            monitor.checkCancelled();
+            switch (action) {
+                case "create_folder" -> result = destination.createFolder(name).getPathname();
+                case "rename" -> result = file != null ? file.setName(name).getPathname() : folder.setName(name).getPathname();
+                case "move" -> result = file != null ? file.moveTo(destination).getPathname() : folder.moveTo(destination).getPathname();
+                case "copy" -> result = file != null ? file.copyTo(destination, monitor).getPathname() : folder.copyTo(destination, monitor).getPathname();
+                default -> throw new IllegalArgumentException("Unknown operation");
+            }
+            if (backend != null) backend.clearCache();
+            return ProjectToolSupport.result(Map.of("action", action, "source", path, "destination", result, "completed", true));
+        } catch (Exception e) {
+            return ProjectToolSupport.error(e.getClass().getSimpleName() + ": " + e.getMessage() +
+                ". Ghidra may require the entry to be closed or checked in first. Inspect the destination if a folder operation was interrupted.");
+        }
+    }
+
+    private void ensureStable(DomainFolder folder, TaskMonitor monitor) throws Exception {
+        var pending = new java.util.ArrayDeque<DomainFolder>();
+        pending.add(folder);
+        int entries = 0;
+        while (!pending.isEmpty()) {
+            monitor.checkCancelled();
+            var current = pending.removeFirst();
+            if (++entries > 10000) throw new IllegalArgumentException("Folder operation exceeds 10000 entries; use smaller subfolders");
+            if (current.isLinked()) throw new IllegalArgumentException("Linked folders are not supported for mutations");
+            for (DomainFile file : current.getFiles()) {
+                monitor.checkCancelled();
+                if (++entries > 10000) throw new IllegalArgumentException("Folder operation exceeds 10000 entries; use smaller subfolders");
+                if (file.isBusy() || file.isChanged()) throw new IllegalArgumentException("Unsaved/busy file: " + file.getPathname());
+            }
+            for (DomainFolder child : current.getFolders()) {
+                if (pending.size() + entries >= 10000) throw new IllegalArgumentException("Folder operation exceeds 10000 entries; use smaller subfolders");
+                pending.addLast(child);
+            }
+        }
     }
 
     private McpSchema.CallToolResult list(DomainFolder root, Map<String, Object> arguments) {

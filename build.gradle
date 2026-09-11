@@ -66,6 +66,7 @@ dependencies {
 
 tasks.named('test') {
 	useJUnitPlatform()
+    systemProperty 'ghidra.install.dir', ghidraInstallDir
 }
 
 // Exclude additional files from the built extension

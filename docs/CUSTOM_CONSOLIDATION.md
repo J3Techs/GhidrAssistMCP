@@ -100,7 +100,76 @@ Set `JAVA_HOME` to a JDK 25+ before running the command. The task's downloaded J
 is local to its `toolchains` directory; system Java settings were not changed.
 The dependency archive was verified against its publisher's SHA-256 checksum.
 
-Upstream regression tests and custom registry, alias-setting, and function-matching
-tests pass. The extension ZIP is produced under `dist/`. No extension was installed
-and no live user program was modified. GUI initialization and real-binary mutation
-workflows still need a smoke test in a disposable project before deployment.
+All 63 tests pass, including upstream regressions, registry/alias compatibility,
+and disposable ProgramDB/project integration tests. The extension ZIP is produced
+under `dist/`. No extension was installed and no live user program was modified.
+GUI initialization and a real shared-repository connection still need a deployment
+smoke test; repository API dispatch and preconditions have isolated contract tests.
+
+## Script survey implementation
+
+Three Luna agents surveyed 152 script paths (121 distinct file contents). Generic
+operations were integrated into this branch; ECU-specific profiles, A2L/PyCal
+parsers and the optional evidence-template importer remain separate scripts.
+The task workspace contains the original survey reports under `script-survey/`.
+
+The registry now contains 80 implementations and 14 compatibility aliases: 94
+names total. All 49 upstream names are covered by a runtime discovery regression
+test generated from upstream commit `0d412d1`. Upstream's disabled-by-default
+script/import/export settings remain intact. The latest fetch on 2026-09-11
+confirmed that commit is still upstream/master.
+
+| New tool | Purpose |
+| --- | --- |
+| `query_address_context_batch` | Bytes, function, symbols, data/instruction and incoming references for multiple addresses. |
+| `search_symbols_batch` | Exact, substring or glob searches with type/source filters and traversal/output limits. |
+| `read_memory_batch` | Bounded reads with explicit endian and signed/unsigned integer decoding; per-row short-read results. |
+| `read_memory_table` | Explicit stride, offsets and integer field types; validates widths and duplicate names. |
+| `xrefs_batch` | Incoming/outgoing references enriched with endpoint functions and symbols. |
+| `function_inventory` | Structured paginated function ranges, bounded entry-byte hashes, counts and optional call edges. |
+| `scan_instructions` | Mnemonic/text predicates over bounded half-open address ranges. |
+| `scan_function_candidates` | Preview missing functions at instruction/call targets; explicit transactional apply. |
+| `get_register_context` | Actual stored value intervals and gaps, including changes inside a requested range. |
+| `save_program` | Save an open program database without closing or checking it in. |
+| `project_repository` | Ghidra file status/history/checkouts, checkout/add/checkin and undo-checkout with a retained copy. |
+
+Existing tools were extended:
+
+- `project_files`: create folders, copy, move and rename, with dry-run previews,
+  collision checks, exact project paths and dirty/busy-file preconditions. It now
+  runs through MCP task handling; recursive new operations cap preflight at 10,000
+  entries. Folder copy/move is not atomic: inspect the destination after an error.
+- `bulk_transfer_labels`: optional comments, bookmarks, existing data types and
+  register context with preserve/replace/error policies and structured item results.
+  New annotations preview by default. Legacy names still apply unless `dry_run=true`;
+  use `preview_annotations=false` to apply annotations. Annotation apply batches
+  roll back on error. Data types must already resolve in the target program.
+- `set_register_context`: dry-run and structured before/after results; merge and
+  set-if-unset respect interior register intervals. Context/scanner ranges use
+  `[start,end)`; annotation transfer's explicit register `end` is inclusive.
+
+Memory batch/context requests cap total bytes at 1 MiB. Batch xref budgets cap at
+10,000 references, with at most 32 symbols per endpoint and truncation flags.
+64-bit typed integers are decimal strings to preserve precision in JSON clients.
+Register reads fail explicitly when segment limits would leave an incomplete view.
+
+Mutator annotations were corrected for `write_bytes`, `clear_code_ranges`,
+`patch_instruction` and `set_register_context`. Backend context decoration now
+preserves errors, structured results, metadata and remaining content blocks.
+
+### Save verification
+
+The persistence integration test creates a fresh temporary Ghidra project, changes
+a program property, calls `save_program`, verifies the program remains open and
+clean, releases/closes the project, then reopens it from disk and verifies the
+stored property. Active-transaction refusal and clean-file no-op are also tested.
+This verifies program database persistence; FrontEnd session metadata is a
+different operation. Save never performs checkout, checkin or forced unlocking.
+
+### Repository operations
+
+`project_repository` uses the active project's configured Ghidra repository and
+permissions, not Git. Add/checkin require a comment. Dirty/busy files are refused,
+checkin refuses pending merges, and undo-checkout requires `confirm=true` and
+always retains a private copy. Interactive update/merge, force checkout, hijack,
+and repository authentication setup are intentionally not automated.

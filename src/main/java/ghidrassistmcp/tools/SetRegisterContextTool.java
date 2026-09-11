@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressRangeIterator;
 import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.listing.ProgramContext;
@@ -21,6 +22,9 @@ import io.modelcontextprotocol.spec.McpSchema;
  * affect addressing modes and data pointer resolution.
  */
 public class SetRegisterContextTool implements McpTool {
+
+    @Override
+    public boolean isReadOnly() { return false; }
 
     @Override
     public String getName() {
@@ -41,7 +45,8 @@ public class SetRegisterContextTool implements McpTool {
                 "register", new McpSchema.JsonSchema("string", null, null, null, null, null),
                 "value", new McpSchema.JsonSchema("string", null, null, null, null, null),
                 "ranges", new McpSchema.JsonSchema("string", null, null, null, null, null),
-                "mode", new McpSchema.JsonSchema("string", null, null, null, null, null)
+                "mode", new McpSchema.JsonSchema("string", null, null, null, null, null),
+                "dry_run", Map.of("type", "boolean", "description", "Preview without writing (default false)", "default", false)
             ),
             List.of("register", "value", "ranges"), null, null, null);
     }
@@ -50,8 +55,7 @@ public class SetRegisterContextTool implements McpTool {
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
         if (currentProgram == null) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("No program currently loaded")
-                .build();
+                .isError(true).addTextContent("No program currently loaded").build();
         }
 
         // Get parameters
@@ -59,11 +63,11 @@ public class SetRegisterContextTool implements McpTool {
         String valueStr = (String) arguments.get("value");
         String rangesStr = (String) arguments.get("ranges");
         String mode = (String) arguments.get("mode");
+        boolean dryRun = Boolean.TRUE.equals(arguments.get("dry_run"));
 
         if (registerName == null || valueStr == null || rangesStr == null) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("register, value, and ranges parameters are required")
-                .build();
+                .isError(true).addTextContent("register, value, and ranges parameters are required").build();
         }
 
         // Default mode
@@ -74,8 +78,7 @@ public class SetRegisterContextTool implements McpTool {
         // Validate mode
         if (!mode.equals("overwrite") && !mode.equals("set_if_unset") && !mode.equals("merge")) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Invalid mode: " + mode + ". Must be 'overwrite', 'set_if_unset', or 'merge'")
-                .build();
+                .isError(true).addTextContent("Invalid mode: " + mode + ". Must be 'overwrite', 'set_if_unset', or 'merge'").build();
         }
 
         // Resolve register
@@ -101,8 +104,7 @@ public class SetRegisterContextTool implements McpTool {
                 availableRegs.append("  ... (more registers available)\n");
             }
             return McpSchema.CallToolResult.builder()
-                .addTextContent(availableRegs.toString())
-                .build();
+                .isError(true).addTextContent(availableRegs.toString()).build();
         }
 
         // Parse value as BigInteger
@@ -111,8 +113,7 @@ public class SetRegisterContextTool implements McpTool {
             value = parseValue(valueStr);
         } catch (NumberFormatException e) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Invalid value format: " + valueStr + ". Use decimal or hex (0x prefix).")
-                .build();
+                .isError(true).addTextContent("Invalid value format: " + valueStr + ". Use decimal or hex (0x prefix).").build();
         }
 
         // Parse ranges
@@ -121,88 +122,77 @@ public class SetRegisterContextTool implements McpTool {
             ranges = parseRanges(currentProgram, rangesStr);
         } catch (IllegalArgumentException e) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Invalid ranges format: " + e.getMessage())
-                .build();
+                .isError(true).addTextContent("Invalid ranges format: " + e.getMessage()).build();
         }
 
         if (ranges.isEmpty()) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("No valid ranges specified")
-                .build();
+                .isError(true).addTextContent("No valid ranges specified").build();
         }
 
         // Apply register context within a transaction
-        int transactionID = currentProgram.startTransaction("Set Register Context");
+        List<Map<String, Object>> changes = new ArrayList<>();
+        int transactionID = dryRun ? -1 : currentProgram.startTransaction("Set Register Context");
         try {
             int rangesUpdated = 0;
             int rangesSkipped = 0;
             List<String> notes = new ArrayList<>();
+            int segmentsInspected = 0;
 
             for (AddressRange range : ranges) {
+                List<ValueSegment> segments = valueSegments(context, register, range, 10000 - segmentsInspected);
+                segmentsInspected += segments.size();
+                BigInteger beforeStart = segments.isEmpty() ? null : segments.get(0).value;
+                BigInteger beforeEnd = segments.isEmpty() ? null : segments.get(segments.size() - 1).value;
                 switch (mode) {
                     case "overwrite":
-                        context.setValue(register, range.start, range.end.subtract(1), value);
+                        if (!dryRun) context.setValue(register, range.start, range.end.subtract(1), value);
                         rangesUpdated++;
+                        changes.add(change(range, beforeStart, beforeEnd, value, "overwrite", dryRun));
                         break;
-
                     case "set_if_unset":
-                        // Check if register has a value at the start of the range
-                        BigInteger existing = context.getValue(register, range.start, false);
-                        if (existing == null) {
-                            context.setValue(register, range.start, range.end.subtract(1), value);
-                            rangesUpdated++;
-                        } else {
-                            rangesSkipped++;
-                            notes.add("Skipped " + range.start + "-" + range.end +
-                                     " (existing value: 0x" + existing.toString(16) + ")");
+                        for (ValueSegment segment : segments) {
+                            if (segment.value == null) {
+                                if (!dryRun) context.setValue(register, segment.start, segment.end.subtract(1), value);
+                                rangesUpdated++;
+                                changes.add(change(segment.start, segment.end, segment.value, value, "set", dryRun));
+                            } else {
+                                rangesSkipped++;
+                            }
                         }
                         break;
 
                     case "merge":
                         // OR with existing value
-                        BigInteger current = context.getValue(register, range.start, false);
-                        BigInteger merged = current != null ? current.or(value) : value;
-                        context.setValue(register, range.start, range.end.subtract(1), merged);
-                        rangesUpdated++;
-                        if (current != null) {
-                            notes.add("Merged at " + range.start + ": 0x" + current.toString(16) +
-                                     " | 0x" + value.toString(16) + " = 0x" + merged.toString(16));
+                        for (ValueSegment segment : segments) {
+                            BigInteger current = segment.value;
+                            BigInteger merged = current != null ? current.or(value) : value;
+                            if (!dryRun) context.setValue(register, segment.start, segment.end.subtract(1), merged);
+                            rangesUpdated++;
+                            changes.add(change(segment.start, segment.end, segment.value, merged, "merge", dryRun));
+                            if (current != null) {
+                                notes.add("Merged at " + segment.start + ": 0x" + current.toString(16) +
+                                         " | 0x" + value.toString(16) + " = 0x" + merged.toString(16));
+                            }
                         }
                         break;
                 }
             }
 
-            currentProgram.endTransaction(transactionID, true);
+            if (!dryRun) currentProgram.endTransaction(transactionID, true);
 
-            // Build result
-            StringBuilder result = new StringBuilder();
-            result.append("Set Register Context Result:\n\n");
-            result.append("Register: ").append(register.getName()).append("\n");
-            result.append("Value: 0x").append(value.toString(16)).append("\n");
-            result.append("Mode: ").append(mode).append("\n\n");
-            result.append("Ranges updated: ").append(rangesUpdated).append("\n");
-            if (rangesSkipped > 0) {
-                result.append("Ranges skipped: ").append(rangesSkipped).append("\n");
-            }
-
-            if (!notes.isEmpty()) {
-                result.append("\nNotes:\n");
-                for (String note : notes) {
-                    result.append("  ").append(note).append("\n");
-                }
-            }
-
-            result.append("\nStatus: SUCCESS");
-
-            return McpSchema.CallToolResult.builder()
-                .addTextContent(result.toString())
-                .build();
+            // Build structured result
+            Map<String, Object> result = new java.util.LinkedHashMap<>();
+            result.put("register", register.getName()); result.put("value", "0x" + value.toString(16));
+            result.put("mode", mode); result.put("dry_run", dryRun);
+            result.put("ranges_updated", rangesUpdated); result.put("ranges_skipped", rangesSkipped);
+            result.put("changes", changes); result.put("notes", notes);
+            result.put("status", "SUCCESS");
+            return ProjectToolSupport.result(result);
 
         } catch (Exception e) {
-            currentProgram.endTransaction(transactionID, false);
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Error setting register context: " + e.getMessage())
-                .build();
+            if (!dryRun && transactionID >= 0) currentProgram.endTransaction(transactionID, false);
+            return ProjectToolSupport.error("Error setting register context: " + e.getMessage());
         }
     }
 
@@ -240,13 +230,14 @@ public class SetRegisterContextTool implements McpTool {
 
     /**
      * Parse ranges string into list of AddressRange objects.
-     * Format: "0x1000-0x2000,0x3000-0x4000" or "0x1000-0x2000"
+     * Format: half-open "0x1000-0x2000,0x3000-0x4000" ranges ([start,end)).
      */
-    private List<AddressRange> parseRanges(Program program, String rangesStr) throws IllegalArgumentException {
+    static List<AddressRange> parseRanges(Program program, String rangesStr) throws IllegalArgumentException {
         List<AddressRange> ranges = new ArrayList<>();
 
         // Split by comma
         String[] rangeParts = rangesStr.split(",");
+        if (rangeParts.length > 1000) throw new IllegalArgumentException("At most 1000 ranges are allowed");
         for (String rangePart : rangeParts) {
             rangePart = rangePart.trim();
             if (rangePart.isEmpty()) continue;
@@ -283,7 +274,7 @@ public class SetRegisterContextTool implements McpTool {
     /**
      * Find the separator dash in a range string, handling hex addresses.
      */
-    private int findRangeSeparator(String range) {
+    private static int findRangeSeparator(String range) {
         int lastDash = range.lastIndexOf('-');
         if (lastDash <= 0) return -1;
 
@@ -298,13 +289,67 @@ public class SetRegisterContextTool implements McpTool {
     /**
      * Helper class to represent an address range.
      */
-    private static class AddressRange {
-        Address start;
-        Address end;
+    static class AddressRange {
+        final Address start;
+        final Address end;
 
         AddressRange(Address start, Address end) {
             this.start = start;
             this.end = end;
         }
+    }
+
+    static List<ValueSegment> valueSegments(ProgramContext context, Register register,
+                                            AddressRange requested, int maxSegments) {
+        List<ValueSegment> result = new ArrayList<>();
+        Address cursor = requested.start;
+        AddressRangeIterator iterator = context.getRegisterValueAddressRanges(register, requested.start, requested.end.subtract(1));
+        while (iterator.hasNext()) {
+            if (Thread.currentThread().isInterrupted()) throw new IllegalArgumentException("Register context operation cancelled");
+            ghidra.program.model.address.AddressRange defined = iterator.next();
+            if (defined.getMinAddress().compareTo(requested.end) >= 0) break;
+            Address start = defined.getMinAddress().compareTo(requested.start) < 0 ? requested.start : defined.getMinAddress();
+            Address endExclusive = defined.getMaxAddress().compareTo(requested.end.subtract(1)) >= 0
+                    ? requested.end : defined.getMaxAddress().add(1);
+            if (endExclusive.compareTo(requested.start) <= 0 || start.compareTo(requested.end) >= 0) continue;
+            if (cursor.compareTo(start) < 0) { addSegment(result, new ValueSegment(cursor, start, null), maxSegments); }
+            if (start.compareTo(cursor) < 0) start = cursor;
+            if (start.compareTo(endExclusive) < 0) {
+                addSegment(result, new ValueSegment(start, endExclusive, context.getValue(register, start, false)), maxSegments);
+                cursor = endExclusive;
+            }
+        }
+        if (cursor.compareTo(requested.end) < 0)
+            addSegment(result, new ValueSegment(cursor, requested.end, null), maxSegments);
+        return result;
+    }
+
+    private static void addSegment(List<ValueSegment> result, ValueSegment segment, int maxSegments) {
+        if (result.size() >= maxSegments) throw new IllegalArgumentException("Register segment limit exceeded; use smaller ranges");
+        result.add(segment);
+    }
+
+    static class ValueSegment {
+        final Address start, end; final BigInteger value;
+        ValueSegment(Address start, Address end, BigInteger value) { this.start = start; this.end = end; this.value = value; }
+    }
+
+    private static String format(BigInteger value) { return value == null ? "unset" : "0x" + value.toString(16); }
+
+    private static Map<String, Object> change(AddressRange range, BigInteger start, BigInteger end,
+                                               BigInteger after, String action, boolean dryRun) {
+        Map<String, Object> c = new java.util.LinkedHashMap<>();
+        c.put("start", range.start.toString()); c.put("end", range.end.toString());
+        c.put("before_start", format(start)); c.put("before_end", format(end));
+        c.put("after", format(after)); c.put("action", action); c.put("applied", !dryRun);
+        return c;
+    }
+
+    private static Map<String, Object> change(Address start, Address end, BigInteger before,
+                                               BigInteger after, String action, boolean dryRun) {
+        Map<String, Object> c = new java.util.LinkedHashMap<>();
+        c.put("start", start.toString()); c.put("end", end.toString());
+        c.put("before", format(before)); c.put("after", format(after));
+        c.put("action", action); c.put("applied", !dryRun); return c;
     }
 }
