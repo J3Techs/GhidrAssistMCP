@@ -73,7 +73,7 @@ public class GhidrAssistMCPManager {
      * The first tool to register will start the MCP server.
      *
      * @param tool The PluginTool to register
-     * @param pluginProvider The UI provider (only used from first registration)
+     * @param pluginProvider The UI provider (can be null, set later with setProvider)
      * @return true if this is the first registration (server owner)
      */
     public synchronized boolean registerTool(PluginTool tool, GhidrAssistMCPProvider pluginProvider) {
@@ -92,15 +92,14 @@ public class GhidrAssistMCPManager {
 
         // First registration starts the server
         if (registeredTools.size() == 1) {
-            this.provider = pluginProvider;
-
             // Load saved configuration from Ghidra options before starting server
             loadSettings(tool);
 
-            if (provider != null) {
-                backend.addEventListener(provider);
-                provider.onBackendReady();
+            // Provider may be set later via setProvider()
+            if (pluginProvider != null) {
+                setProvider(pluginProvider);
             }
+
             startServer();
             return true;
         }
@@ -111,6 +110,27 @@ public class GhidrAssistMCPManager {
         }
 
         return false;
+    }
+
+    /**
+     * Set the UI provider for event notifications.
+     * Called by the server owner plugin after creating its provider.
+     */
+    public synchronized void setProvider(GhidrAssistMCPProvider newProvider) {
+        if (newProvider == null) {
+            Msg.warn(this, "Attempted to set null provider");
+            return;
+        }
+
+        // Remove old provider if exists
+        if (this.provider != null && this.provider != newProvider) {
+            backend.removeEventListener(this.provider);
+        }
+
+        this.provider = newProvider;
+        backend.addEventListener(provider);
+        provider.onBackendReady();
+        Msg.info(this, "Provider set and registered for events");
     }
 
     /**

@@ -70,14 +70,14 @@ public class GhidrAssistMCPProvider extends ComponentProvider implements McpEven
         this.plugin = plugin;
         this.toolEnabledStates = new HashMap<>();
         this.dateFormat = new SimpleDateFormat("HH:mm:ss");
-        
+
         buildComponent();
         createActions();
-        // Don't load settings yet - wait for backend to be ready
-        
+
         setHelpLocation(new HelpLocation("GhidrAssistMCP", "GhidrAssistMCP_Provider"));
-        setVisible(true);
-        
+        setWindowMenuGroup("MCP");
+        setTitle(NAME);
+
         // Add focus listener to refresh tools when window receives focus
         addFocusListener();
     }

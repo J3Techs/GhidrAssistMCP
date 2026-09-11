@@ -42,51 +42,51 @@ public class GhidrAssistMCPPlugin extends ProgramPlugin {
 
 	/**
 	 * Plugin constructor.
-	 * 
+	 *
 	 * @param tool The plugin tool that this plugin is added to.
 	 */
 	public GhidrAssistMCPPlugin(PluginTool tool) {
 		super(tool);
-		
-		// Create the UI provider but don't register it yet
-		provider = new GhidrAssistMCPProvider(tool, this);
+		// Don't create provider here - do it in init() to avoid registration issues
 	}
 
 	@Override
 	public void init() {
 		super.init();
 
+		Msg.info(this, "GhidrAssistMCPPlugin.init() starting...");
+
 		// Get the singleton manager
 		manager = GhidrAssistMCPManager.getInstance();
 
-		// Register the UI provider with the tool first
-		if (provider != null) {
-			try {
-				tool.addComponentProvider(provider, true);
-				Msg.info(this, "Successfully registered UI provider");
-			} catch (IllegalArgumentException e) {
-				if (e.getMessage() != null && e.getMessage().contains("was already added")) {
-					Msg.info(this, "UI provider already registered, continuing");
-				} else {
-					Msg.error(this, "Failed to register UI provider (non-fatal): " + e.getMessage());
-				}
-			} catch (Exception e) {
-				Msg.error(this, "Failed to register UI provider (non-fatal): " + e.getMessage());
+		// Register this tool with the singleton manager FIRST (before creating provider)
+		// The first tool to register becomes the server owner
+		isServerOwner = manager.registerTool(tool, null);
+
+		Msg.info(this, "Manager registration complete. isServerOwner=" + isServerOwner);
+
+		// Now create and register the UI provider
+		try {
+			provider = new GhidrAssistMCPProvider(tool, this);
+			Msg.info(this, "Provider created successfully");
+
+			// Register provider with tool - this adds it to Window menu
+			tool.addComponentProvider(provider, false);
+			Msg.info(this, "Provider added to tool");
+
+			// Make it visible
+			provider.setVisible(true);
+			Msg.info(this, "Provider set to visible");
+
+			// If we're server owner, register provider with manager for events
+			if (isServerOwner) {
+				manager.setProvider(provider);
+				Msg.info(this, "Provider registered with manager as server owner");
 			}
-		}
 
-		// Register this tool with the singleton manager
-		// The first tool to register becomes the server owner and gets its provider used
-		isServerOwner = manager.registerTool(tool, provider);
-
-		if (isServerOwner) {
-			Msg.info(this, "This plugin instance is the MCP server owner");
-		} else {
-			Msg.info(this, "This plugin instance registered with existing MCP server");
-		}
-
-		if (provider != null) {
 			provider.logSession("Plugin initialized" + (isServerOwner ? " (server owner)" : ""));
+		} catch (Exception e) {
+			Msg.error(this, "Failed to create/register UI provider: " + e.getMessage(), e);
 		}
 	}
 	
@@ -147,15 +147,17 @@ public class GhidrAssistMCPPlugin extends ProgramPlugin {
 	
 	@Override
 	protected void dispose() {
+		Msg.info(this, "GhidrAssistMCPPlugin.dispose() called, isServerOwner=" + isServerOwner);
+
+		// Remove the provider from the tool first
 		if (provider != null) {
 			provider.logSession("Plugin disposing");
-
 			try {
 				tool.removeComponentProvider(provider);
+				Msg.info(this, "Provider removed from tool");
 			} catch (Exception e) {
-				Msg.error(this, "Error removing UI provider", e);
+				Msg.error(this, "Error removing UI provider: " + e.getMessage());
 			}
-			provider = null;
 		}
 
 		// Unregister this tool from the singleton manager
@@ -164,6 +166,7 @@ public class GhidrAssistMCPPlugin extends ProgramPlugin {
 			manager.unregisterTool(tool);
 		}
 
+		provider = null;
 		super.dispose();
 	}
 	
