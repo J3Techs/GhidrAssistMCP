@@ -20,7 +20,7 @@ public class ListDataTool implements McpTool {
     
     @Override
     public String getName() {
-        return "list_data";
+        return "get_data_vars";
     }
     
     @Override
@@ -89,34 +89,32 @@ public class ListDataTool implements McpTool {
                 continue;
             }
             
-            // Apply limit
-            if (count >= limit) {
-                break;
+            // Apply limit to displayed results only; keep scanning for a true total.
+            if (count < limit) {
+                DataType dataType = data.getDataType();
+                String typeName = dataType != null ? dataType.getName() : "unknown";
+                String value = data.getDefaultValueRepresentation();
+                if (value != null && value.length() > 50) {
+                    value = value.substring(0, 47) + "...";
+                }
+
+                result.append("@ ").append(data.getAddress())
+                      .append(" [").append(typeName).append("]");
+
+                if (data.hasStringValue()) {
+                    result.append(" String: ").append(value != null ? value : "null");
+                } else if (value != null) {
+                    result.append(" Value: ").append(value);
+                }
+
+                // Add symbol name if available
+                if (data.getPrimarySymbol() != null) {
+                    result.append(" (").append(data.getPrimarySymbol().getName()).append(")");
+                }
+
+                result.append("\n");
+                count++;
             }
-            
-            DataType dataType = data.getDataType();
-            String typeName = dataType != null ? dataType.getName() : "unknown";
-            String value = data.getDefaultValueRepresentation();
-            if (value != null && value.length() > 50) {
-                value = value.substring(0, 47) + "...";
-            }
-            
-            result.append("@ ").append(data.getAddress())
-                  .append(" [").append(typeName).append("]");
-            
-            if (data.hasStringValue()) {
-                result.append(" String: ").append(value != null ? value : "null");
-            } else if (value != null) {
-                result.append(" Value: ").append(value);
-            }
-            
-            // Add symbol name if available
-            if (data.getPrimarySymbol() != null) {
-                result.append(" (").append(data.getPrimarySymbol().getName()).append(")");
-            }
-            
-            result.append("\n");
-            count++;
         }
         
         if (totalCount == 0) {

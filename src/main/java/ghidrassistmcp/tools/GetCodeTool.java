@@ -8,7 +8,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
-import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.CommentType;
@@ -20,9 +19,11 @@ import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.model.pcode.PcodeBlockBasic;
 import ghidra.program.model.pcode.PcodeOp;
 import ghidra.program.model.pcode.PcodeOpAST;
-import ghidra.program.model.symbol.Namespace;
 import ghidra.util.task.TaskMonitor;
 import ghidrassistmcp.McpTool;
+import ghidrassistmcp.GhidrAssistMCPBackend;
+import ghidrassistmcp.decompiler.DecompilerService;
+import ghidrassistmcp.decompiler.DecompilerSession;
 import io.modelcontextprotocol.spec.McpSchema;
 
 /**
@@ -30,6 +31,12 @@ import io.modelcontextprotocol.spec.McpSchema;
  * Replaces separate decompile_function, disassemble_function, and get_pcode tools.
  */
 public class GetCodeTool implements McpTool {
+
+    private final DecompilerService decompilerService;
+
+    public GetCodeTool(DecompilerService decompilerService) {
+        this.decompilerService = decompilerService;
+    }
 
     @Override
     public boolean isLongRunning() {
@@ -40,6 +47,16 @@ public class GetCodeTool implements McpTool {
     @Override
     public boolean isCacheable() {
         return true;
+    }
+
+    @Override
+    public String getCacheDiscriminator(Map<String, Object> arguments, Program currentProgram,
+            GhidrAssistMCPBackend backend) {
+        String format = (String) arguments.get("format");
+        if (format != null && format.equalsIgnoreCase("disassembly")) {
+            return "disassembly";
+        }
+        return decompilerService.getOptionsFingerprint(currentProgram);
     }
 
     @Override
@@ -132,21 +149,19 @@ public class GetCodeTool implements McpTool {
      * Get decompiled C-like code for a function.
      */
     private McpSchema.CallToolResult getDecompiledCode(Program program, Function function) {
-        DecompInterface decompiler = new DecompInterface();
-        try {
-            decompiler.openProgram(function.getProgram());
-
-            DecompileResults results = decompiler.decompileFunction(function, 30, TaskMonitor.DUMMY);
+        try (DecompilerSession session = decompilerService.open(function.getProgram())) {
+            DecompileResults results = session.decompiler().decompileFunction(function,
+                session.options().getDefaultTimeout(), TaskMonitor.DUMMY);
 
             if (results.isTimedOut()) {
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("Decompilation timed out for function: " + function.getName())
+                    .addTextContent("Decompilation timed out for function: " + function.getName(true))
                     .build();
             }
 
             if (results.isValid() == false) {
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("Decompilation error for function " + function.getName() + ": " + results.getErrorMessage())
+                    .addTextContent("Decompilation error for function " + function.getName(true) + ": " + results.getErrorMessage())
                     .build();
             }
 
@@ -154,20 +169,18 @@ public class GetCodeTool implements McpTool {
 
             if (decompiledCode == null || decompiledCode.trim().isEmpty()) {
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("No decompiled code available for function: " + function.getName())
+                    .addTextContent("No decompiled code available for function: " + function.getName(true))
                     .build();
             }
 
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Decompiled function " + function.getName() + ":\n\n" + decompiledCode)
+                .addTextContent("Decompiled function " + function.getName(true) + ":\n\n" + decompiledCode)
                 .build();
 
         } catch (Exception e) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Error decompiling function " + function.getName() + ": " + e.getMessage())
+                .addTextContent("Error decompiling function " + function.getName(true) + ": " + e.getMessage())
                 .build();
-        } finally {
-            decompiler.dispose();
         }
     }
 
@@ -176,7 +189,7 @@ public class GetCodeTool implements McpTool {
      */
     private McpSchema.CallToolResult getDisassemblyCode(Program program, Function function) {
         StringBuilder result = new StringBuilder();
-        result.append("Disassembly of function: ").append(function.getName()).append("\n");
+        result.append("Disassembly of function: ").append(function.getName(true)).append("\n");
         result.append("Entry Point: ").append(function.getEntryPoint()).append("\n\n");
 
         // Iterate through instructions in the function
@@ -221,24 +234,23 @@ public class GetCodeTool implements McpTool {
      */
     private McpSchema.CallToolResult getPcodeRepresentation(Program program, Function function, boolean raw) {
         StringBuilder result = new StringBuilder();
-        result.append("P-Code for: ").append(function.getName())
+        result.append("P-Code for: ").append(function.getName(true))
               .append(" @ ").append(function.getEntryPoint()).append("\n\n");
 
-        DecompInterface decompiler = new DecompInterface();
-        try {
-            decompiler.openProgram(program);
-            DecompileResults results = decompiler.decompileFunction(function, 30, TaskMonitor.DUMMY);
+        try (DecompilerSession session = decompilerService.open(program)) {
+            DecompileResults results = session.decompiler().decompileFunction(function,
+                session.options().getDefaultTimeout(), TaskMonitor.DUMMY);
 
             if (!results.decompileCompleted()) {
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("Decompilation failed for function: " + function.getName())
+                    .addTextContent("Decompilation failed for function: " + function.getName(true))
                     .build();
             }
 
             HighFunction highFunction = results.getHighFunction();
             if (highFunction == null) {
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("Could not get high function for: " + function.getName())
+                    .addTextContent("Could not get high function for: " + function.getName(true))
                     .build();
             }
 
@@ -276,14 +288,12 @@ public class GetCodeTool implements McpTool {
 
             // Add summary
             result.append("## Summary:\n");
-            result.append("- Function: ").append(function.getName()).append("\n");
+            result.append("- Function: ").append(function.getName(true)).append("\n");
             result.append("- Entry: ").append(function.getEntryPoint()).append("\n");
 
             var blocks = highFunction.getBasicBlocks();
             result.append("- Basic Blocks: ").append(blocks.size()).append("\n");
 
-        } finally {
-            decompiler.dispose();
         }
 
         return McpSchema.CallToolResult.builder()
@@ -312,51 +322,7 @@ public class GetCodeTool implements McpTool {
             // Not an address, try as function name
         }
 
-        // Check if this is a qualified name (contains ::)
-        if (identifier.contains("::")) {
-            String[] parts = identifier.split("::");
-            if (parts.length >= 2) {
-                String simpleName = parts[parts.length - 1];
-                String[] namespaceParts = new String[parts.length - 1];
-                System.arraycopy(parts, 0, namespaceParts, 0, parts.length - 1);
-
-                // Search for function with matching name AND namespace
-                for (Function function : program.getFunctionManager().getFunctions(true)) {
-                    if (function.getName().equals(simpleName) &&
-                        matchesNamespaceHierarchy(function, namespaceParts)) {
-                        return function;
-                    }
-                }
-            }
-        }
-
-        // Fall back to simple name search
-        for (Function function : program.getFunctionManager().getFunctions(true)) {
-            if (function.getName().equals(identifier)) {
-                return function;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Check if a function's namespace hierarchy matches the given qualified path.
-     * For example, if qualifiedPath is ["Outer", "Inner"], checks if function is in Inner,
-     * which is in Outer.
-     */
-    private boolean matchesNamespaceHierarchy(Function function, String[] namespaceParts) {
-        Namespace ns = function.getParentNamespace();
-
-        // Walk backwards through the namespace parts
-        for (int i = namespaceParts.length - 1; i >= 0; i--) {
-            if (ns == null || ns.isGlobal()) {
-                return false; // Ran out of namespaces before matching all parts
-            }
-            if (!ns.getName().equals(namespaceParts[i])) {
-                return false; // Namespace name doesn't match
-            }
-            ns = ns.getParentNamespace();
-        }
-        return true;
+        // Handles C++ qualified names (Class::method) and plain names
+        return FunctionLookup.findByQualifiedName(program, identifier);
     }
 }

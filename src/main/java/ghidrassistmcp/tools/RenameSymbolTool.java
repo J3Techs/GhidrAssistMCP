@@ -13,7 +13,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import javax.swing.SwingUtilities;
 
-import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Data;
@@ -25,11 +24,14 @@ import ghidra.program.model.pcode.HighSymbol;
 import ghidra.program.model.symbol.Namespace;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.Symbol;
+import ghidra.program.model.symbol.SymbolIterator;
 import ghidra.program.model.symbol.SymbolTable;
 import ghidra.util.exception.DuplicateNameException;
 import ghidra.util.exception.InvalidInputException;
 import ghidra.util.task.TaskMonitor;
 import ghidrassistmcp.McpTool;
+import ghidrassistmcp.decompiler.DecompilerService;
+import ghidrassistmcp.decompiler.DecompilerSession;
 import io.modelcontextprotocol.spec.McpSchema;
 
 /**
@@ -37,6 +39,12 @@ import io.modelcontextprotocol.spec.McpSchema;
  * Replaces separate rename_function, rename_data, and rename_variable tools.
  */
 public class RenameSymbolTool implements McpTool {
+
+    private final DecompilerService decompilerService;
+
+    public RenameSymbolTool(DecompilerService decompilerService) {
+        this.decompilerService = decompilerService;
+    }
 
     @Override
     public boolean isReadOnly() {
@@ -91,7 +99,8 @@ public class RenameSymbolTool implements McpTool {
                 .build();
         }
 
-        RenameSymbolCore.RenameResult result = RenameSymbolCore.renameOne(arguments, currentProgram);
+        RenameSymbolCore.RenameResult result =
+            RenameSymbolCore.renameOne(arguments, currentProgram, decompilerService);
         return McpSchema.CallToolResult.builder()
             .addTextContent(result.message)
             .build();
@@ -120,7 +129,8 @@ final class RenameSymbolCore {
         // utility
     }
 
-    static RenameResult renameOne(Map<String, Object> arguments, Program program) {
+    static RenameResult renameOne(Map<String, Object> arguments, Program program,
+            DecompilerService decompilerService) {
         if (program == null) {
             return new RenameResult(false, "No program currently loaded");
         }
@@ -151,7 +161,8 @@ final class RenameSymbolCore {
                 if (variableName == null || variableName.isEmpty()) {
                     return new RenameResult(false, "variable_name parameter is required when target_type is 'variable'");
                 }
-                return renameVariable(program, identifier, variableName, newName);
+                return renameVariable(program, identifier, variableName, newName,
+                    decompilerService);
             }
             default:
                 return new RenameResult(false, "Invalid target_type. Use 'function', 'data', or 'variable'");
@@ -187,7 +198,7 @@ final class RenameSymbolCore {
      * Returns a result per request index (partial success supported).
      */
     static Map<Integer, RenameResult> renameVariablesBatch(Program program, String functionName,
-                                                          List<VariableRenameRequest> renames) {
+            List<VariableRenameRequest> renames, DecompilerService decompilerService) {
         Map<Integer, RenameResult> resultsByIndex = new HashMap<>();
 
         if (program == null) {
@@ -211,10 +222,9 @@ final class RenameSymbolCore {
             return resultsByIndex;
         }
 
-        DecompInterface decompiler = new DecompInterface();
-        try {
-            decompiler.openProgram(program);
-            DecompileResults decompileResults = decompiler.decompileFunction(function, 30, TaskMonitor.DUMMY);
+        try (DecompilerSession session = decompilerService.open(program)) {
+            DecompileResults decompileResults = session.decompiler().decompileFunction(function,
+                session.options().getDefaultTimeout(), TaskMonitor.DUMMY);
 
             if (decompileResults.isTimedOut()) {
                 for (VariableRenameRequest r : renames) {
@@ -307,8 +317,6 @@ final class RenameSymbolCore {
                 resultsByIndex.put(r.index, new RenameResult(false, "Error renaming variable: " + e.getMessage()));
             }
             return resultsByIndex;
-        } finally {
-            decompiler.dispose();
         }
     }
 
@@ -398,15 +406,10 @@ final class RenameSymbolCore {
      * Note: Symbol operations must run on the Swing EDT to avoid race conditions with
      * Ghidra's Symbol Tree UI updates.
      */
-    private static RenameResult renameData(Program program, String addressStr, String newName) {
-        Address address;
-        try {
-            address = program.getAddressFactory().getAddress(addressStr);
-            if (address == null) {
-                return new RenameResult(false, "Invalid address: " + addressStr);
-            }
-        } catch (Exception e) {
-            return new RenameResult(false, "Invalid address format: " + addressStr);
+    private static RenameResult renameData(Program program, String identifier, String newName) {
+        Address address = resolveDataAddress(program, identifier);
+        if (address == null) {
+            return new RenameResult(false, "Could not resolve data/global symbol: " + identifier);
         }
 
         AtomicReference<RenameResult> resultRef = new AtomicReference<>();
@@ -425,7 +428,7 @@ final class RenameSymbolCore {
                                 primarySymbol.setName(newName, SourceType.USER_DEFINED);
                                 program.endTransaction(transactionID, true);
                                 resultRef.set(new RenameResult(true,
-                                    "Successfully renamed data at " + addressStr +
+                                    "Successfully renamed data at " + identifier +
                                         " from '" + oldName + "' to '" + newName + "'"));
                                 return;
                             } catch (DuplicateNameException e) {
@@ -443,7 +446,7 @@ final class RenameSymbolCore {
                         program.getSymbolTable().createLabel(targetAddress, newName, SourceType.USER_DEFINED);
                         program.endTransaction(transactionID, true);
                         resultRef.set(new RenameResult(true,
-                            "Successfully created label '" + newName + "' at " + addressStr));
+                            "Successfully created label '" + newName + "' at " + identifier));
                         return;
                     }
 
@@ -455,7 +458,7 @@ final class RenameSymbolCore {
                             symbol.setName(newName, SourceType.USER_DEFINED);
                             program.endTransaction(transactionID, true);
                             resultRef.set(new RenameResult(true,
-                                "Successfully renamed symbol at " + addressStr +
+                                "Successfully renamed symbol at " + identifier +
                                     " from '" + oldName + "' to '" + newName + "'"));
                             return;
                         } catch (DuplicateNameException e) {
@@ -473,7 +476,7 @@ final class RenameSymbolCore {
                     program.getSymbolTable().createLabel(targetAddress, newName, SourceType.USER_DEFINED);
                     program.endTransaction(transactionID, true);
                     resultRef.set(new RenameResult(true,
-                        "Successfully created label '" + newName + "' at " + addressStr));
+                        "Successfully created label '" + newName + "' at " + identifier));
                 } catch (Exception e) {
                     program.endTransaction(transactionID, false);
                     resultRef.set(new RenameResult(false, "Error creating label: " + e.getMessage()));
@@ -486,6 +489,32 @@ final class RenameSymbolCore {
         return resultRef.get() != null ? resultRef.get() : new RenameResult(false, "Unknown error renaming data");
     }
 
+    private static Address resolveDataAddress(Program program, String identifier) {
+        try {
+            Address address = program.getAddressFactory().getAddress(identifier);
+            if (address != null && program.getFunctionManager().getFunctionAt(address) == null) {
+                return address;
+            }
+        } catch (Exception e) {
+            // Fall through to symbol lookup
+        }
+
+        SymbolIterator symbols = program.getSymbolTable().getSymbolIterator();
+        while (symbols.hasNext()) {
+            Symbol symbol = symbols.next();
+            if (!symbol.getName().equals(identifier)) {
+                continue;
+            }
+
+            Address address = symbol.getAddress();
+            if (address != null && program.getFunctionManager().getFunctionAt(address) == null) {
+                return address;
+            }
+        }
+
+        return null;
+    }
+
     /**
      * Rename a local variable within a function.
      *
@@ -493,16 +522,15 @@ final class RenameSymbolCore {
      * Ghidra's Symbol Tree UI updates.
      */
     private static RenameResult renameVariable(Program program, String functionName,
-                                              String oldVariableName, String newVariableName) {
+            String oldVariableName, String newVariableName, DecompilerService decompilerService) {
         Function function = findFunctionByName(program, functionName);
         if (function == null) {
             return new RenameResult(false, "Function not found: " + functionName);
         }
 
-        DecompInterface decompiler = new DecompInterface();
-        try {
-            decompiler.openProgram(program);
-            DecompileResults results = decompiler.decompileFunction(function, 30, TaskMonitor.DUMMY);
+        try (DecompilerSession session = decompilerService.open(program)) {
+            DecompileResults results = session.decompiler().decompileFunction(function,
+                session.options().getDefaultTimeout(), TaskMonitor.DUMMY);
 
             if (results.isTimedOut()) {
                 return new RenameResult(false, "Decompilation timed out for function: " + functionName);
@@ -559,20 +587,11 @@ final class RenameSymbolCore {
             return resultRef.get() != null ? resultRef.get() : new RenameResult(false, "Unknown error renaming variable");
         } catch (Exception e) {
             return new RenameResult(false, "Error renaming variable: " + e.getMessage());
-        } finally {
-            decompiler.dispose();
         }
     }
 
     private static Function findFunctionByName(Program program, String functionName) {
-        var functionManager = program.getFunctionManager();
-        var functions = functionManager.getFunctions(true);
-        for (Function function : functions) {
-            if (function.getName().equals(functionName)) {
-                return function;
-            }
-        }
-        return null;
+        return FunctionLookup.findByName(program, functionName);
     }
 
     /**

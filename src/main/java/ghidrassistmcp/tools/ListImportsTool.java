@@ -25,7 +25,7 @@ public class ListImportsTool implements McpTool {
 
     @Override
     public String getName() {
-        return "list_imports";
+        return "get_imports";
     }
     
     @Override
@@ -85,23 +85,21 @@ public class ListImportsTool implements McpTool {
                     continue;
                 }
                 
-                // Apply limit
-                if (count >= limit) {
-                    break;
+                // Apply limit to displayed results only; keep scanning for a true total.
+                if (count < limit) {
+                    String libraryName = "unknown";
+                    if (symbol.getParentNamespace() != null) {
+                        libraryName = symbol.getParentNamespace().getName();
+                    }
+
+                    result.append("- ").append(symbol.getName())
+                          .append(" from ").append(libraryName)
+                          .append(" @ ").append(symbol.getAddress())
+                          .append(" (").append(symbol.getSymbolType()).append(")")
+                          .append("\n");
+
+                    count++;
                 }
-                
-                String libraryName = "unknown";
-                if (symbol.getParentNamespace() != null) {
-                    libraryName = symbol.getParentNamespace().getName();
-                }
-                
-                result.append("- ").append(symbol.getName())
-                      .append(" from ").append(libraryName)
-                      .append(" @ ").append(symbol.getAddress())
-                      .append(" (").append(symbol.getSymbolType()).append(")")
-                      .append("\n");
-                
-                count++;
             }
         }
         

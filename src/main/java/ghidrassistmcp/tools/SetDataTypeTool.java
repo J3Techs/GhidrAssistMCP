@@ -8,7 +8,6 @@ import java.util.Map;
 
 import ghidra.program.model.address.Address;
 import ghidra.program.model.data.DataType;
-import ghidra.program.model.data.DataTypeManager;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.util.CodeUnitInsertionException;
 import ghidrassistmcp.McpTool;
@@ -44,7 +43,11 @@ public class SetDataTypeTool implements McpTool {
         return new McpSchema.JsonSchema("object", 
             Map.of(
                 "address", new McpSchema.JsonSchema("string", null, null, null, null, null),
-                "data_type", new McpSchema.JsonSchema("string", null, null, null, null, null)
+                "data_type", new McpSchema.JsonSchema("string", null, null, null, null, null),
+                "array_count", Map.of(
+                    "type", "integer",
+                    "description", "Optional: wraps data_type in an array of this many elements. Alternatively use suffix syntax like 'int[16]'."
+                )
             ),
             List.of("address", "data_type"), null, null, null);
     }
@@ -76,32 +79,14 @@ public class SetDataTypeTool implements McpTool {
                 .build();
         }
         
-        // Find the data type
-        DataTypeManager dtm = currentProgram.getDataTypeManager();
-        DataType dataType = dtm.getDataType("/" + dataTypeName);
-        if (dataType == null) {
-            // Try finding by name without path
-            dataType = dtm.getDataType(dataTypeName);
-        }
-        
-        if (dataType == null) {
-             // Search for type in all categories if simple lookup failed
-             var allTypes = new java.util.ArrayList<DataType>();
-             dtm.getAllDataTypes(allTypes);
-             for (DataType dt : allTypes) {
-                 if (dt.getName().equals(dataTypeName)) {
-                     dataType = dt;
-                     break;
-                 }
-             }
-        }
-
-        if (dataType == null) {
+        DataTypeResolver.Result resolvedType =
+            DataTypeResolver.resolve(currentProgram.getDataTypeManager(), dataTypeName, arguments.get("array_count"));
+        if (resolvedType.isError()) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Data type not found: " + dataTypeName + 
-                              ". Use built-in types like 'int', 'char', 'void*', etc.")
+                .addTextContent(resolvedType.errorMessage)
                 .build();
         }
+        DataType dataType = resolvedType.dataType;
         
         // Start transaction
         int transactionID = currentProgram.startTransaction("Set Data Type");

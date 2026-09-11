@@ -249,4 +249,3 @@ public class DeleteDataTypeTool implements McpTool {
         return dt.getName();
     }
 }
-

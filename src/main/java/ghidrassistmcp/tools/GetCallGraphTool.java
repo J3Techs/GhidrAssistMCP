@@ -97,7 +97,7 @@ public class GetCallGraphTool implements McpTool {
         }
 
         StringBuilder result = new StringBuilder();
-        result.append("Call Graph for: ").append(function.getName())
+        result.append("Call Graph for: ").append(function.getName(true))
               .append(" @ ").append(function.getEntryPoint()).append("\n\n");
 
         Set<String> visited = new HashSet<>();
@@ -128,14 +128,14 @@ public class GetCallGraphTool implements McpTool {
         String key = function.getEntryPoint().toString();
 
         if (visited.contains(key)) {
-            result.append(indent).append("- ").append(function.getName())
+            result.append(indent).append("- ").append(function.getName(true))
                   .append(" @ ").append(function.getEntryPoint())
                   .append(" (recursive/already visited)\n");
             return;
         }
 
         visited.add(key);
-        result.append(indent).append("- ").append(function.getName())
+        result.append(indent).append("- ").append(function.getName(true))
               .append(" @ ").append(function.getEntryPoint()).append("\n");
 
         if (currentDepth < maxDepth) {
@@ -152,14 +152,14 @@ public class GetCallGraphTool implements McpTool {
         String key = function.getEntryPoint().toString();
 
         if (visited.contains(key)) {
-            result.append(indent).append("- ").append(function.getName())
+            result.append(indent).append("- ").append(function.getName(true))
                   .append(" @ ").append(function.getEntryPoint())
                   .append(" (recursive/already visited)\n");
             return;
         }
 
         visited.add(key);
-        result.append(indent).append("- ").append(function.getName())
+        result.append(indent).append("- ").append(function.getName(true))
               .append(" @ ").append(function.getEntryPoint()).append("\n");
 
         if (currentDepth < maxDepth) {
@@ -183,12 +183,6 @@ public class GetCallGraphTool implements McpTool {
         }
 
         // Try as function name
-        for (Function function : program.getFunctionManager().getFunctions(true)) {
-            if (function.getName().equals(identifier)) {
-                return function;
-            }
-        }
-
-        return null;
+        return FunctionLookup.findByName(program, identifier);
     }
 }

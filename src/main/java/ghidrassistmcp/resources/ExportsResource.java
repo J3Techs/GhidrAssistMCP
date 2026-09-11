@@ -81,7 +81,7 @@ public class ExportsResource implements McpResource {
 
                     if (isEntryPoint || function.getEntryPoint().equals(program.getMinAddress())) {
                         ObjectNode exportNode = objectMapper.createObjectNode();
-                        exportNode.put("name", function.getName());
+                        exportNode.put("name", function.getName(true));
                         exportNode.put("address", function.getEntryPoint().toString());
                         exportNode.put("signature", function.getPrototypeString(false, false));
                         exportNode.put("is_entry_point", isEntryPoint);

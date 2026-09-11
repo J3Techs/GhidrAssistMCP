@@ -39,12 +39,14 @@ public class GhidrAssistMCPProvider extends ComponentProvider implements McpEven
     private static final String HOST_SETTING = "Server Host";
     private static final String PORT_SETTING = "Server Port";
     private static final String ENABLED_SETTING = "Server Enabled";
+    private static final String ASYNC_ENABLED_SETTING = "Async Execution Enabled";
     private static final String TOOL_PREFIX = "Tool.";
     
     // Default values
     private static final String DEFAULT_HOST = "localhost";
     private static final int DEFAULT_PORT = 8080;
     private static final boolean DEFAULT_ENABLED = true;
+    private static final boolean DEFAULT_ASYNC_ENABLED = true;
     
     private final PluginTool tool;
     private final GhidrAssistMCPPlugin plugin;
@@ -54,6 +56,7 @@ public class GhidrAssistMCPProvider extends ComponentProvider implements McpEven
     private JTextField hostField;
     private JSpinner portSpinner;
     private JCheckBox enabledCheckBox;
+    private JCheckBox asyncEnabledCheckBox;
     private JTable toolsTable;
     private DefaultTableModel toolsTableModel;
     private JButton saveButton;
@@ -123,6 +126,12 @@ public class GhidrAssistMCPProvider extends ComponentProvider implements McpEven
         enabledCheckBox = new JCheckBox("Enable MCP Server", DEFAULT_ENABLED);
         serverPanel.add(enabledCheckBox, gbc);
         
+        // Async execution setting
+        gbc.gridy = 3;
+        asyncEnabledCheckBox = new JCheckBox("Enable async tool execution", DEFAULT_ASYNC_ENABLED);
+        asyncEnabledCheckBox.setToolTipText("When enabled, long-running tools execute asynchronously and return a task ID. When disabled, all tools execute synchronously.");
+        serverPanel.add(asyncEnabledCheckBox, gbc);
+
         panel.add(serverPanel, BorderLayout.NORTH);
         
         // Tools panel
@@ -264,12 +273,15 @@ public class GhidrAssistMCPProvider extends ComponentProvider implements McpEven
         String host = Preferences.getProperty(SETTINGS_CATEGORY + "." + HOST_SETTING, DEFAULT_HOST);
         String portStr = Preferences.getProperty(SETTINGS_CATEGORY + "." + PORT_SETTING, String.valueOf(DEFAULT_PORT));
         String enabledStr = Preferences.getProperty(SETTINGS_CATEGORY + "." + ENABLED_SETTING, String.valueOf(DEFAULT_ENABLED));
+        String asyncEnabledStr = Preferences.getProperty(SETTINGS_CATEGORY + "." + ASYNC_ENABLED_SETTING, String.valueOf(DEFAULT_ASYNC_ENABLED));
 
         int port = DEFAULT_PORT;
         boolean enabled = DEFAULT_ENABLED;
+        boolean asyncEnabled = DEFAULT_ASYNC_ENABLED;
         try {
             port = Integer.parseInt(portStr);
             enabled = Boolean.parseBoolean(enabledStr);
+            asyncEnabled = Boolean.parseBoolean(asyncEnabledStr);
         } catch (NumberFormatException e) {
             logMessage("Warning: Failed to parse preferences, using defaults");
         }
@@ -277,6 +289,7 @@ public class GhidrAssistMCPProvider extends ComponentProvider implements McpEven
         hostField.setText(host);
         portSpinner.setValue(port);
         enabledCheckBox.setSelected(enabled);
+        asyncEnabledCheckBox.setSelected(asyncEnabled);
 
         // Load tool enabled states from tool options
         Options options = tool.getOptions(SETTINGS_CATEGORY);
@@ -288,12 +301,14 @@ public class GhidrAssistMCPProvider extends ComponentProvider implements McpEven
                 int loadedCount = 0;
                 for (var tool1 : tools) {
                     String toolName = tool1.name();
-                    boolean toolEnabled = options.getBoolean(TOOL_PREFIX + toolName, true);
+                    boolean toolEnabled = options.getBoolean(TOOL_PREFIX + toolName,
+                        plugin.getBackend().isToolEnabled(toolName));
                     toolEnabledStates.put(toolName, toolEnabled);
                     loadedCount++;
                 }
                 // Update backend with loaded settings
                 plugin.getBackend().updateToolEnabledStates(toolEnabledStates);
+                toolEnabledStates.putAll(plugin.getBackend().getToolEnabledStates());
                 logMessage("Loaded tool states from settings: " + loadedCount + " tools configured");
             } catch (Exception e) {
                 logMessage("Error loading tool states: " + e.getMessage());
@@ -308,6 +323,7 @@ public class GhidrAssistMCPProvider extends ComponentProvider implements McpEven
         Preferences.setProperty(SETTINGS_CATEGORY + "." + HOST_SETTING, hostField.getText());
         Preferences.setProperty(SETTINGS_CATEGORY + "." + PORT_SETTING, String.valueOf(portSpinner.getValue()));
         Preferences.setProperty(SETTINGS_CATEGORY + "." + ENABLED_SETTING, String.valueOf(enabledCheckBox.isSelected()));
+        Preferences.setProperty(SETTINGS_CATEGORY + "." + ASYNC_ENABLED_SETTING, String.valueOf(asyncEnabledCheckBox.isSelected()));
 
         // Force preferences to be saved to disk
         Preferences.store();
@@ -327,7 +343,15 @@ public class GhidrAssistMCPProvider extends ComponentProvider implements McpEven
 
         // Apply changes to the plugin
         plugin.applyConfiguration(hostField.getText(), (Integer) portSpinner.getValue(),
-                                enabledCheckBox.isSelected(), toolEnabledStates);
+                                enabledCheckBox.isSelected(), asyncEnabledCheckBox.isSelected(),
+                                toolEnabledStates);
+        if (plugin.getBackend() != null) {
+            toolEnabledStates.putAll(plugin.getBackend().getToolEnabledStates());
+            for (var entry : toolEnabledStates.entrySet()) {
+                options.setBoolean(TOOL_PREFIX + entry.getKey(), entry.getValue());
+            }
+            refreshToolsList();
+        }
     }
     
     public void logMessage(String message) {
@@ -384,6 +408,10 @@ public class GhidrAssistMCPProvider extends ComponentProvider implements McpEven
         return enabledCheckBox.isSelected();
     }
     
+    public boolean isAsyncEnabled() {
+        return asyncEnabledCheckBox.isSelected();
+    }
+
     public Map<String, Boolean> getToolEnabledStates() {
         return new HashMap<>(toolEnabledStates);
     }

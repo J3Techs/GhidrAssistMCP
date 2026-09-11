@@ -66,7 +66,7 @@ public class GetBasicBlocksTool implements McpTool {
         }
 
         StringBuilder result = new StringBuilder();
-        result.append("Basic Blocks for: ").append(function.getName())
+        result.append("Basic Blocks for: ").append(function.getName(true))
               .append(" @ ").append(function.getEntryPoint()).append("\n\n");
 
         try {
@@ -143,11 +143,6 @@ public class GetBasicBlocksTool implements McpTool {
             // Not an address
         }
 
-        for (Function function : program.getFunctionManager().getFunctions(true)) {
-            if (function.getName().equals(identifier)) {
-                return function;
-            }
-        }
-        return null;
+        return FunctionLookup.findByName(program, identifier);
     }
 }

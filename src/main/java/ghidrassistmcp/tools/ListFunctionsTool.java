@@ -6,6 +6,7 @@ package ghidrassistmcp.tools;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
@@ -30,7 +31,7 @@ public class ListFunctionsTool implements McpTool {
 
     @Override
     public String getName() {
-        return "list_functions";
+        return "get_functions";
     }
 
     @Override
@@ -137,26 +138,26 @@ public class ListFunctionsTool implements McpTool {
                 break;
             }
             case "starts_with": {
-                String p = caseSensitive ? pattern : pattern.toLowerCase();
+                String p = caseSensitive ? pattern : pattern.toLowerCase(Locale.ROOT);
                 predicate = name -> {
-                    String n = caseSensitive ? name : name.toLowerCase();
+                    String n = caseSensitive ? name : name.toLowerCase(Locale.ROOT);
                     return n.startsWith(p);
                 };
                 break;
             }
             case "ends_with": {
-                String p = caseSensitive ? pattern : pattern.toLowerCase();
+                String p = caseSensitive ? pattern : pattern.toLowerCase(Locale.ROOT);
                 predicate = name -> {
-                    String n = caseSensitive ? name : name.toLowerCase();
+                    String n = caseSensitive ? name : name.toLowerCase(Locale.ROOT);
                     return n.endsWith(p);
                 };
                 break;
             }
             case "contains":
             default: {
-                String p = caseSensitive ? pattern : pattern.toLowerCase();
+                String p = caseSensitive ? pattern : pattern.toLowerCase(Locale.ROOT);
                 predicate = name -> {
-                    String n = caseSensitive ? name : name.toLowerCase();
+                    String n = caseSensitive ? name : name.toLowerCase(Locale.ROOT);
                     return n.contains(p);
                 };
                 break;
@@ -248,7 +249,7 @@ public class ListFunctionsTool implements McpTool {
             Function function = functions.next();
 
             if (hasPattern) {
-                if (matcher.test(function.getName())) {
+                if (matcher.test(function.getName()) || matcher.test(function.getName(true))) {
                     matchingFunctions.add(function);
                 }
             } else {
@@ -262,7 +263,7 @@ public class ListFunctionsTool implements McpTool {
         // Apply offset and limit
         for (int i = offset; i < matchingFunctions.size() && count < limit; i++) {
             Function function = matchingFunctions.get(i);
-            result.append("- ").append(function.getName())
+            result.append("- ").append(function.getName(true))
                   .append(" @ ").append(function.getEntryPoint())
                   .append(" (").append(function.getParameterCount()).append(" params)")
                   .append("\n");

@@ -6,9 +6,9 @@ bin/
 data/
 dist/
 build/
-ghidra_scripts/
 lib/
 os/
 lucene/
 ghidrassist_analysis.db
 ghidrassist_rlhf.db
+.gitlab-ci.yml

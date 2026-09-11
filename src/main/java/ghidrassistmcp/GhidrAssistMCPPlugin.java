@@ -11,6 +11,7 @@ import ghidra.MiscellaneousPluginPackage;
 import ghidra.app.plugin.PluginCategoryNames;
 import ghidra.app.plugin.ProgramPlugin;
 import ghidra.app.services.ProgramManager;
+import ghidra.framework.model.DomainFile;
 import ghidra.framework.plugintool.*;
 import ghidra.framework.plugintool.util.PluginStatus;
 import ghidra.program.model.address.Address;
@@ -94,9 +95,9 @@ public class GhidrAssistMCPPlugin extends ProgramPlugin {
 	 * Apply new configuration from the UI.
 	 * Delegates to the singleton manager which handles server restart if needed.
 	 */
-	public void applyConfiguration(String host, int port, boolean enabled, Map<String, Boolean> toolStates) {
+	public void applyConfiguration(String host, int port, boolean enabled, boolean asyncEnabled, Map<String, Boolean> toolStates) {
 		if (manager != null) {
-			manager.applyConfiguration(host, port, enabled, toolStates);
+			manager.applyConfiguration(host, port, enabled, asyncEnabled, toolStates);
 		}
 	}
 	
@@ -250,21 +251,29 @@ public class GhidrAssistMCPPlugin extends ProgramPlugin {
 
 		List<Program> programs = getAllOpenPrograms();
 
-		// First try exact match
+		// Exact project path match (e.g. "/v1/app.exe" disambiguates from "/v2/app.exe")
+		for (Program p : programs) {
+			DomainFile df = p.getDomainFile();
+			if (df != null && df.getPathname().equals(programName)) {
+				return p;
+			}
+		}
+
+		// Exact name match
 		for (Program p : programs) {
 			if (p.getName().equals(programName)) {
 				return p;
 			}
 		}
 
-		// Try case-insensitive match
+		// Case-insensitive match
 		for (Program p : programs) {
 			if (p.getName().equalsIgnoreCase(programName)) {
 				return p;
 			}
 		}
 
-		// Try partial match (contains)
+		// Partial match
 		for (Program p : programs) {
 			if (p.getName().toLowerCase().contains(programName.toLowerCase())) {
 				return p;

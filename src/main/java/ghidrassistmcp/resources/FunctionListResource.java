@@ -73,7 +73,7 @@ public class FunctionListResource implements McpResource {
 
             for (Function function : program.getFunctionManager().getFunctions(true)) {
                 ObjectNode funcNode = objectMapper.createObjectNode();
-                funcNode.put("name", function.getName());
+                funcNode.put("name", function.getName(true));
                 funcNode.put("address", function.getEntryPoint().toString());
                 funcNode.put("signature", function.getPrototypeString(false, false));
                 funcNode.put("is_thunk", function.isThunk());

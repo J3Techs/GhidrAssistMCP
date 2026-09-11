@@ -117,7 +117,7 @@ public class SearchBytesTool implements McpTool {
             // Try to get function context
             var func = currentProgram.getFunctionManager().getFunctionContaining(match);
             if (func != null) {
-                result.append(" in ").append(func.getName());
+                result.append(" in ").append(func.getName(true));
             }
             result.append("\n");
         }

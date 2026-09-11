@@ -24,7 +24,7 @@ public class ListStringsTool implements McpTool {
 
     @Override
     public String getName() {
-        return "list_strings";
+        return "get_strings";
     }
     
     @Override
@@ -108,23 +108,21 @@ public class ListStringsTool implements McpTool {
                         continue;
                     }
                     
-                    // Apply limit
-                    if (count >= limit) {
-                        break;
+                    // Apply limit to displayed results only; keep scanning for a true total.
+                    if (count < limit) {
+                        // Clean up the string representation for display
+                        String displayString = stringValue;
+                        if (displayString.length() > 80) {
+                            displayString = displayString.substring(0, 77) + "...";
+                        }
+
+                        result.append("@ ").append(data.getAddress())
+                              .append(" (").append(stringText.length()).append(" chars): ")
+                              .append(displayString)
+                              .append("\n");
+
+                        count++;
                     }
-                    
-                    // Clean up the string representation for display
-                    String displayString = stringValue;
-                    if (displayString.length() > 80) {
-                        displayString = displayString.substring(0, 77) + "...";
-                    }
-                    
-                    result.append("@ ").append(data.getAddress())
-                          .append(" (").append(stringText.length()).append(" chars): ")
-                          .append(displayString)
-                          .append("\n");
-                    
-                    count++;
                 }
             }
         }

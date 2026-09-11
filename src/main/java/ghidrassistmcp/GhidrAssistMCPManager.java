@@ -5,9 +5,12 @@ package ghidrassistmcp;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import ghidra.app.services.ProgramManager;
+import ghidra.framework.model.DomainFile;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.framework.preferences.Preferences;
 import ghidra.program.model.listing.Program;
@@ -100,7 +103,8 @@ public class GhidrAssistMCPManager {
                 setProvider(pluginProvider);
             }
 
-            startServer();
+            // setProvider starts discovery after the owner's saved tool states
+            // have loaded. The plugin attaches that provider later during init.
             return true;
         }
 
@@ -127,9 +131,14 @@ public class GhidrAssistMCPManager {
             backend.removeEventListener(this.provider);
         }
 
+        Map<String, Boolean> previousStates = backend.getToolEnabledStates();
         this.provider = newProvider;
         backend.addEventListener(provider);
         provider.onBackendReady();
+        if (server != null && !previousStates.equals(backend.getToolEnabledStates())) {
+            stopServer();
+        }
+        startServer();
         Msg.info(this, "Provider set and registered for events");
     }
 
@@ -222,6 +231,47 @@ public class GhidrAssistMCPManager {
     }
 
     /**
+     * Get the CodeBrowser tool that owns the requested program. Prefer the active tool when the
+     * same program is open in more than one window so its current UI options take precedence.
+     */
+    public PluginTool getToolForProgram(Program program) {
+        if (program == null) {
+            return null;
+        }
+
+        PluginTool currentActiveTool = activeTool;
+        if (ownsProgram(currentActiveTool, program)) {
+            return currentActiveTool;
+        }
+        for (PluginTool tool : registeredTools) {
+            if (ownsProgram(tool, program)) {
+                return tool;
+            }
+        }
+        return null;
+    }
+
+    private boolean ownsProgram(PluginTool tool, Program program) {
+        if (tool == null) {
+            return false;
+        }
+        ProgramManager programManager = tool.getService(ProgramManager.class);
+        if (programManager == null) {
+            return false;
+        }
+        Program[] openPrograms = programManager.getAllOpenPrograms();
+        if (openPrograms == null) {
+            return false;
+        }
+        for (Program openProgram : openPrograms) {
+            if (openProgram == program) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Set the active plugin instance (called when a plugin gains focus).
      * This provides access to UI context like current address and function.
      */
@@ -275,7 +325,15 @@ public class GhidrAssistMCPManager {
 
         List<Program> programs = getAllOpenPrograms();
 
-        // Exact match
+        // Exact project path match (e.g. "/v1/app.exe" disambiguates from "/v2/app.exe")
+        for (Program p : programs) {
+            DomainFile df = p.getDomainFile();
+            if (df != null && df.getPathname().equals(programName)) {
+                return p;
+            }
+        }
+
+        // Exact name match
         for (Program p : programs) {
             if (p.getName().equals(programName)) {
                 return p;
@@ -330,10 +388,10 @@ public class GhidrAssistMCPManager {
     /**
      * Apply configuration changes.
      */
-    public void applyConfiguration(String host, int port, boolean enabled,
-                                   java.util.Map<String, Boolean> toolStates) {
+    public void applyConfiguration(String host, int port, boolean enabled, boolean asyncEnabled,
+                                   Map<String, Boolean> toolStates) {
         if (provider != null) {
-            provider.logMessage("Applying configuration: " + host + ":" + port + " enabled=" + enabled);
+            provider.logMessage("Applying configuration: " + host + ":" + port + " enabled=" + enabled + " async=" + asyncEnabled);
         }
 
         boolean needsRestart = false;
@@ -347,6 +405,18 @@ public class GhidrAssistMCPManager {
         if (enabled != serverEnabled) {
             serverEnabled = enabled;
             needsRestart = true;
+        }
+
+        if (server != null && toolStatesChanged(toolStates)) {
+            needsRestart = true;
+            if (provider != null) {
+                provider.logMessage("Tool availability changed; restarting MCP server to update discovery");
+            }
+        }
+
+        // Update async execution setting
+        if (backend != null) {
+            backend.setAsyncExecutionEnabled(asyncEnabled);
         }
 
         // Update tool states
@@ -368,6 +438,26 @@ public class GhidrAssistMCPManager {
         if (provider != null) {
             provider.refreshToolsList();
         }
+    }
+
+    /**
+     * MCP tool discovery is built when the server starts, so changed tool states
+     * require a restart before clients see the updated catalog.
+     */
+    private boolean toolStatesChanged(Map<String, Boolean> toolStates) {
+        if (backend == null || toolStates == null) {
+            return false;
+        }
+
+        Map<String, Boolean> currentStates = backend.getToolEnabledStates();
+        for (Map.Entry<String, Boolean> entry : toolStates.entrySet()) {
+            String toolName = entry.getKey();
+            if (currentStates.containsKey(toolName) &&
+                !Objects.equals(currentStates.get(toolName), entry.getValue())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -394,6 +484,7 @@ public class GhidrAssistMCPManager {
         currentHost = Preferences.getProperty("GhidrAssistMCP.Server Host", "localhost");
         String portStr = Preferences.getProperty("GhidrAssistMCP.Server Port", "8080");
         String enabledStr = Preferences.getProperty("GhidrAssistMCP.Server Enabled", "true");
+        String asyncEnabledStr = Preferences.getProperty("GhidrAssistMCP.Async Execution Enabled", "true");
 
         try {
             currentPort = Integer.parseInt(portStr);
@@ -404,10 +495,15 @@ public class GhidrAssistMCPManager {
             serverEnabled = true;
         }
 
-        Msg.info(this, "Loaded settings from Ghidra preferences: " + currentHost + ":" + currentPort + " enabled=" + serverEnabled);
+        boolean asyncEnabled = Boolean.parseBoolean(asyncEnabledStr);
+        if (backend != null) {
+            backend.setAsyncExecutionEnabled(asyncEnabled);
+        }
+
+        Msg.info(this, "Loaded settings from Ghidra preferences: " + currentHost + ":" + currentPort + " enabled=" + serverEnabled + " async=" + asyncEnabled);
 
         if (provider != null) {
-            provider.logMessage("Loaded configuration: " + currentHost + ":" + currentPort + " enabled=" + serverEnabled);
+            provider.logMessage("Loaded configuration: " + currentHost + ":" + currentPort + " enabled=" + serverEnabled + " async=" + asyncEnabled);
         }
     }
 

@@ -79,7 +79,7 @@ public class GetCurrentFunctionTool implements McpTool {
 
         StringBuilder result = new StringBuilder();
         result.append("Current Function Information:\n\n");
-        result.append("Name: ").append(currentFunction.getName()).append("\n");
+        result.append("Name: ").append(currentFunction.getName(true)).append("\n");
         result.append("Entry Point: ").append(currentFunction.getEntryPoint()).append("\n");
         result.append("Address Range: ").append(currentFunction.getBody().getMinAddress())
               .append(" - ").append(currentFunction.getBody().getMaxAddress()).append("\n");
