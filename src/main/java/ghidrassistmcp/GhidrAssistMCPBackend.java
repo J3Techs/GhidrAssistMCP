@@ -202,6 +202,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
         registerTool(new ghidrassistmcp.tools.ScanInstructionsTool());
         registerTool(new ghidrassistmcp.tools.ScanFunctionCandidatesTool());
         registerTool(new ghidrassistmcp.tools.GetRegisterContextTool());
+        for (McpTool bsimTool : ghidrassistmcp.bsim.BsimTool.tools()) registerTool(bsimTool);
         registerTool(new AssembleCodeTool());         // assemble_code: assemble instructions and optionally patch bytes
         registerTool(new PatchBytesTool());           // patch_bytes: write patched bytes into program memory
 

@@ -8,6 +8,7 @@ GhidrAssistMCP bridges the gap between AI-powered analysis tools and Ghidra's co
 
 ### Key Features
 
+- **Native BSim workflows**: 32 database, corpus, query, reviewed-match, and persistent-job tools. See [BSim tools](docs/BSIM.md).
 - **MCP Server Integration**: Full Model Context Protocol server implementation using official SDK
 - **Dual HTTP Transports**: Supports SSE and Streamable HTTP transports for maximum client compatibility
 - **Upstream tools plus 12 custom tools and legacy API compatibility**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs

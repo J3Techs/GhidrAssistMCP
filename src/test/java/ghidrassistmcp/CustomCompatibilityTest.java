@@ -55,7 +55,9 @@ class CustomCompatibilityTest {
             "search_symbols_batch", "read_memory_batch", "read_memory_table", "xrefs_batch",
             "function_inventory", "scan_instructions", "scan_function_candidates", "get_register_context");
         assertTrue(names.containsAll(additions));
-        assertEquals(94, names.size());
+        var bsimNames = ghidrassistmcp.bsim.BsimTool.tools().stream().map(McpTool::getName).collect(Collectors.toSet());
+        assertTrue(names.containsAll(bsimNames));
+        assertEquals(94 + bsimNames.size(), names.size());
     }
 
     @Test
