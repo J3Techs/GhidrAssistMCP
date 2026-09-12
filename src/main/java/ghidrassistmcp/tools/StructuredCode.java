@@ -100,6 +100,8 @@ final class StructuredCode {
                 result.put("truncated", symbolIterator.hasNext() || ops.hasNext() || tokenTruncated);
                 return ProjectToolSupport.result(result);
             }
+        } catch (ghidra.util.exception.CancelledException e) {
+            throw new java.util.concurrent.CancellationException("Code request cancelled");
         } catch (Exception e) { return ProjectToolSupport.error(e.getClass().getSimpleName() + ": " + e.getMessage()); }
     }
     private static Map<String, Object> varnode(Varnode value) {
@@ -107,7 +109,7 @@ final class StructuredCode {
         return Map.of("address", BatchQuerySupport.addr(value.getAddress()), "size", value.getSize(),
             "constant", value.isConstant(), "register", value.isRegister(), "unique", value.isUnique());
     }
-    private static int positive(Map<String, Object> args, String key, int fallback, int max) {
+    static int positive(Map<String, Object> args, String key, int fallback, int max) {
         int result = BatchQuerySupport.integer(args, key, fallback, max);
         if (result == 0) throw new IllegalArgumentException(key + " must be positive");
         return result;

@@ -165,6 +165,21 @@ SSE messages:    http://127.0.0.1:8080/message
 Streamable HTTP: http://127.0.0.1:8080/mcp
 ```
 
+Streamable HTTP clients must retain the `Mcp-Session-Id` returned by `initialize`
+and send it on subsequent requests. The compatibility shim normalizes Accept
+headers and a trailing endpoint slash; it never supplies a session ID from another
+request. Each client initializes its own session.
+
+For `get_code`, `timeout_seconds` applies to native decompilation in both text
+and structured output (including p-code), defaults to 30 seconds, and accepts
+integers from 1 through 300. Async cancellation reaches the native decompiler.
+Failed decompilation returns an MCP error and a failed task; cancellation settles
+as cancelled after the worker stops.
+
+Successful sync and async queries share the result cache. Results are cached only
+when the target program revision and relevant options stay unchanged during the
+operation. Active-window context is added afresh when a result is returned.
+
 The headless MCP server runs inside the `analyzeHeadless` JVM and uses the loaded `currentProgram`. The server holds a program consumer while it is running so MCP requests do not race against program database closure. Use `wait=true` when you want `analyzeHeadless` to stay open for interactive MCP clients. A harness can also pass `completion_file=/workspace/control/session.complete`; creating that file closes the MCP server cleanly and lets Ghidra save and exit normally.
 
 Disposable static-analysis labs may pass `tool_profile=agent_lab`. This enables sandbox-local program export while arbitrary path import and Ghidra scripts remain disabled because they can expose process secrets or spawn processes. The harness owns artifact imports. Unknown profiles are rejected.

@@ -5,14 +5,12 @@ import java.util.Collections;
 import java.util.Enumeration;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.concurrent.atomic.AtomicReference;
 
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
 import jakarta.servlet.http.HttpServletResponse;
-import jakarta.servlet.http.HttpServletResponseWrapper;
 import io.modelcontextprotocol.server.transport.HttpServletStreamableServerTransportProvider;
 
 /**
@@ -21,11 +19,9 @@ import io.modelcontextprotocol.server.transport.HttpServletStreamableServerTrans
 public class LenientStreamableTransportServlet extends HttpServlet {
 
     private static final String ACCEPT = "Accept";
-    private static final String SESSION_HEADER = "Mcp-Session-Id";
 
     private final HttpServletStreamableServerTransportProvider delegate;
     private final String mcpEndpoint;
-    private final AtomicReference<String> lastSessionId = new AtomicReference<>();
 
     public LenientStreamableTransportServlet(
             HttpServletStreamableServerTransportProvider delegate,
@@ -37,8 +33,8 @@ public class LenientStreamableTransportServlet extends HttpServlet {
     @Override
     protected void service(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
         HttpServletRequest wrappedReq = wrapRequest(req);
-        HttpServletResponse wrappedResp = wrapResponse(resp);
-        delegate.service(wrappedReq, wrappedResp);
+        // Session identity must come from this request. The SDK owns session validation.
+        delegate.service(wrappedReq, resp);
     }
 
     @Override
@@ -47,7 +43,7 @@ public class LenientStreamableTransportServlet extends HttpServlet {
         super.destroy();
     }
 
-    private HttpServletRequest wrapRequest(HttpServletRequest request) {
+    HttpServletRequest wrapRequest(HttpServletRequest request) {
         return new HttpServletRequestWrapper(request) {
             @Override
             public String getRequestURI() {
@@ -66,13 +62,6 @@ public class LenientStreamableTransportServlet extends HttpServlet {
                 if (ACCEPT.equalsIgnoreCase(name)) {
                     return normalizeAccept(super.getHeader(name));
                 }
-                if (SESSION_HEADER.equalsIgnoreCase(name)) {
-                    String direct = super.getHeader(name);
-                    if (direct != null && !direct.isBlank()) {
-                        return direct;
-                    }
-                    return lastSessionId.get();
-                }
                 return super.getHeader(name);
             }
 
@@ -81,34 +70,7 @@ public class LenientStreamableTransportServlet extends HttpServlet {
                 if (name != null && ACCEPT.equalsIgnoreCase(name)) {
                     return Collections.enumeration(Collections.singletonList(normalizeAccept(super.getHeader(name))));
                 }
-                if (name != null && SESSION_HEADER.equalsIgnoreCase(name)) {
-                    String session = getHeader(name);
-                    if (session == null || session.isBlank()) {
-                        return Collections.emptyEnumeration();
-                    }
-                    return Collections.enumeration(Collections.singletonList(session));
-                }
                 return super.getHeaders(name);
-            }
-        };
-    }
-
-    private HttpServletResponse wrapResponse(HttpServletResponse response) {
-        return new HttpServletResponseWrapper(response) {
-            @Override
-            public void setHeader(String name, String value) {
-                if (name != null && SESSION_HEADER.equalsIgnoreCase(name) && value != null && !value.isBlank()) {
-                    lastSessionId.set(value);
-                }
-                super.setHeader(name, value);
-            }
-
-            @Override
-            public void addHeader(String name, String value) {
-                if (name != null && SESSION_HEADER.equalsIgnoreCase(name) && value != null && !value.isBlank()) {
-                    lastSessionId.set(value);
-                }
-                super.addHeader(name, value);
             }
         };
     }

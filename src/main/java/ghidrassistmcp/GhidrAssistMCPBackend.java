@@ -419,15 +419,13 @@ public class GhidrAssistMCPBackend implements McpBackend {
             Program targetProgram = resolveTargetProgram(arguments);
 
             // Check cache for cacheable tools
-            String cacheDiscriminator = tool.isCacheable() && targetProgram != null
-                    ? tool.getCacheDiscriminator(arguments, targetProgram, this)
-                    : "";
-            if (tool.isCacheable() && targetProgram != null) {
-                String cacheKey = cache.generateKey(toolName, arguments, ProgramIdentity.id(targetProgram),
-                    cacheDiscriminator);
-                McpSchema.CallToolResult cachedResult = cache.get(cacheKey, targetProgram);
+            CacheSnapshot cacheSnapshot = captureCacheSnapshot(tool, toolName, arguments, targetProgram);
+            if (cacheSnapshot != null) {
+                McpSchema.CallToolResult cachedResult = cache.get(cacheSnapshot.key(), targetProgram);
                 if (cachedResult != null) {
                     Msg.info(this, "Cache hit for tool: " + toolName);
+                    cachedResult = addActiveContextToResult(cachedResult,
+                        resolveResultProgramContext(tool, arguments, targetProgram));
                     notifyToolResponse(toolName, cachedResult);
                     return cachedResult;
                 }
@@ -435,23 +433,17 @@ public class GhidrAssistMCPBackend implements McpBackend {
 
             // Check if this is a long-running tool that should be executed asynchronously
             if (tool.isLongRunning() && asyncExecutionEnabled) {
-                return executeToolAsync(tool, toolName, arguments, targetProgram);
+                return executeToolAsync(tool, toolName, arguments, targetProgram, cacheSnapshot);
             }
 
             // Execute synchronously for normal tools
             McpSchema.CallToolResult result = executeGuarded(tool, arguments, targetProgram, null);
 
+            cacheSuccessfulResult(tool, toolName, arguments, targetProgram, cacheSnapshot, result, null);
+
             // Add active context information to help LLM understand which binary is in focus
             result = addActiveContextToResult(result,
                 resolveResultProgramContext(tool, arguments, targetProgram));
-
-            // Cache the result if tool is cacheable
-            if (tool.isCacheable() && targetProgram != null) {
-                String cacheKey = cache.generateKey(toolName, arguments, ProgramIdentity.id(targetProgram),
-                    cacheDiscriminator);
-                cache.put(cacheKey, result, targetProgram);
-                Msg.debug(this, "Cached result for tool: " + toolName);
-            }
 
             // Notify listeners of the response
             notifyToolResponse(toolName, result);
@@ -475,14 +467,13 @@ public class GhidrAssistMCPBackend implements McpBackend {
      * Execute a long-running tool asynchronously and return a task ID.
      */
     private McpSchema.CallToolResult executeToolAsync(McpTool tool, String toolName,
-                                                       Map<String, Object> arguments, Program targetProgram) {
-        // Create a reference to this backend for the async execution
-        final GhidrAssistMCPBackend backend = this;
-
+                                                       Map<String, Object> arguments, Program targetProgram,
+                                                       CacheSnapshot cacheSnapshot) {
         McpTask task = submitTask(toolName, arguments, targetProgram, taskContext -> {
             try {
                 McpSchema.CallToolResult result =
                     executeGuarded(tool, arguments, targetProgram, taskContext);
+                cacheSuccessfulResult(tool, toolName, arguments, targetProgram, cacheSnapshot, result, taskContext);
                 // Store the raw result, but retain context in the response shown to listeners.
                 // get_task_status decorates the stored result once using this task's snapshot.
                 notifyToolResponse(toolName,
@@ -503,6 +494,27 @@ public class GhidrAssistMCPBackend implements McpBackend {
                 "Use get_task_status with this task_id to check progress and retrieve results.\n" +
                 "Use cancel_task to cancel if needed.")
             .build();
+    }
+
+    private record CacheSnapshot(String key, String programName, long modificationNumber) {}
+
+    private CacheSnapshot captureCacheSnapshot(McpTool tool, String toolName,
+            Map<String, Object> arguments, Program program) {
+        if (!tool.isCacheable() || program == null || program.isClosed()) return null;
+        return new CacheSnapshot(cache.generateKey(toolName, arguments, ProgramIdentity.id(program),
+            tool.getCacheDiscriminator(arguments, program, this)), program.getName(), program.getModificationNumber());
+    }
+
+    /** Both execution paths cache raw successes only, with the revision captured before execution. */
+    private void cacheSuccessfulResult(McpTool tool, String toolName, Map<String, Object> arguments,
+            Program program, CacheSnapshot before, McpSchema.CallToolResult result, McpTask task) {
+        if (before == null || result == null || Boolean.TRUE.equals(result.isError())
+                || Thread.currentThread().isInterrupted()
+                || task != null && task.getStatus() == McpTask.Status.CANCEL_REQUESTED) return;
+        CacheSnapshot after = captureCacheSnapshot(tool, toolName, arguments, program);
+        if (before.equals(after)) {
+            cache.put(before.key(), result, before.programName(), before.modificationNumber());
+        }
     }
 
     /**

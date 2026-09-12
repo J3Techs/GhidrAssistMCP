@@ -106,76 +106,96 @@ public class GetCodeTool implements McpTool {
     }
 
     private McpSchema.CallToolResult executeWithMonitor(Map<String, Object> arguments, Program currentProgram, TaskMonitor monitor) {
-        if (currentProgram == null) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("No program currently loaded")
-                .build();
-        }
-
-        String functionIdentifier = (String) arguments.get("function");
-        String format = (String) arguments.get("format");
-        boolean raw = Boolean.TRUE.equals(arguments.get("raw"));
-
-        if (functionIdentifier == null || functionIdentifier.isEmpty()) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("function parameter is required")
-                .build();
-        }
-
-        if (format == null || format.isEmpty()) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("format parameter is required (decompiler, disassembly, or pcode)")
-                .build();
-        }
-
-        format = format.toLowerCase();
-        if (!format.equals("decompiler") && !format.equals("disassembly") && !format.equals("pcode")) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Invalid format. Use 'decompiler', 'disassembly', or 'pcode'")
-                .build();
-        }
-
-        // Find the function
-        Function function = findFunction(currentProgram, functionIdentifier);
-        if (function == null) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Function not found: " + functionIdentifier)
-                .build();
-        }
-
-        // Dispatch to appropriate handler based on format
-        if (Boolean.TRUE.equals(arguments.get("structured")))
-            return StructuredCode.read(decompilerService, arguments, currentProgram, function, format, monitor);
-        switch (format) {
-            case "decompiler":
-                return getDecompiledCode(currentProgram, function);
-            case "disassembly":
-                return getDisassemblyCode(currentProgram, function);
-            case "pcode":
-                return getPcodeRepresentation(currentProgram, function, raw);
-            default:
+        try {
+            monitor.checkCancelled();
+            int timeout = StructuredCode.positive(arguments, "timeout_seconds", 30, 300);
+            if (currentProgram == null) {
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("Unknown format: " + format)
+                    .isError(true)
+                    .addTextContent("No program currently loaded")
                     .build();
+            }
+
+            String functionIdentifier = (String) arguments.get("function");
+            String format = (String) arguments.get("format");
+            boolean raw = Boolean.TRUE.equals(arguments.get("raw"));
+
+            if (functionIdentifier == null || functionIdentifier.isEmpty()) {
+                return McpSchema.CallToolResult.builder()
+                    .isError(true)
+                    .addTextContent("function parameter is required")
+                    .build();
+            }
+
+            if (format == null || format.isEmpty()) {
+                return McpSchema.CallToolResult.builder()
+                    .isError(true)
+                    .addTextContent("format parameter is required (decompiler, disassembly, or pcode)")
+                    .build();
+            }
+
+            format = format.toLowerCase();
+            if (!format.equals("decompiler") && !format.equals("disassembly") && !format.equals("pcode")) {
+                return McpSchema.CallToolResult.builder()
+                    .isError(true)
+                    .addTextContent("Invalid format. Use 'decompiler', 'disassembly', or 'pcode'")
+                    .build();
+            }
+
+            // Find the function
+            Function function = findFunction(currentProgram, functionIdentifier);
+            if (function == null) {
+                return McpSchema.CallToolResult.builder()
+                    .isError(true)
+                    .addTextContent("Function not found: " + functionIdentifier)
+                    .build();
+            }
+
+            // Dispatch to appropriate handler based on format
+            if (Boolean.TRUE.equals(arguments.get("structured")))
+                return StructuredCode.read(decompilerService, arguments, currentProgram, function, format, monitor);
+            switch (format) {
+                case "decompiler":
+                    return getDecompiledCode(currentProgram, function, timeout, monitor);
+                case "disassembly":
+                    return getDisassemblyCode(currentProgram, function, monitor);
+                case "pcode":
+                    return getPcodeRepresentation(currentProgram, function, raw, timeout, monitor);
+                default:
+                    return McpSchema.CallToolResult.builder()
+                        .isError(true)
+                        .addTextContent("Unknown format: " + format)
+                        .build();
+            }
+        } catch (ghidra.util.exception.CancelledException e) {
+            throw new java.util.concurrent.CancellationException("Code request cancelled");
+        } catch (java.util.concurrent.CancellationException e) {
+            throw e;
+        } catch (Exception e) {
+            return ProjectToolSupport.error(e.getClass().getSimpleName() + ": " + e.getMessage());
         }
     }
 
     /**
      * Get decompiled C-like code for a function.
      */
-    private McpSchema.CallToolResult getDecompiledCode(Program program, Function function) {
+    private McpSchema.CallToolResult getDecompiledCode(Program program, Function function, int timeout, TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
         try (DecompilerSession session = decompilerService.open(function.getProgram())) {
+            monitor.checkCancelled();
             DecompileResults results = session.decompiler().decompileFunction(function,
-                session.options().getDefaultTimeout(), TaskMonitor.DUMMY);
+                timeout, monitor);
+            monitor.checkCancelled();
 
             if (results.isTimedOut()) {
                 return McpSchema.CallToolResult.builder()
+                    .isError(true)
                     .addTextContent("Decompilation timed out for function: " + function.getName(true))
                     .build();
             }
 
-            if (results.isValid() == false) {
+            if (!results.decompileCompleted() || !results.isValid() || results.getDecompiledFunction() == null) {
                 return McpSchema.CallToolResult.builder()
+                    .isError(true)
                     .addTextContent("Decompilation error for function " + function.getName(true) + ": " + results.getErrorMessage())
                     .build();
             }
@@ -184,6 +204,7 @@ public class GetCodeTool implements McpTool {
 
             if (decompiledCode == null || decompiledCode.trim().isEmpty()) {
                 return McpSchema.CallToolResult.builder()
+                    .isError(true)
                     .addTextContent("No decompiled code available for function: " + function.getName(true))
                     .build();
             }
@@ -192,8 +213,11 @@ public class GetCodeTool implements McpTool {
                 .addTextContent("Decompiled function " + function.getName(true) + ":\n\n" + decompiledCode)
                 .build();
 
+        } catch (ghidra.util.exception.CancelledException e) {
+            throw e;
         } catch (Exception e) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("Error decompiling function " + function.getName(true) + ": " + e.getMessage())
                 .build();
         }
@@ -202,7 +226,7 @@ public class GetCodeTool implements McpTool {
     /**
      * Get disassembly for a function.
      */
-    private McpSchema.CallToolResult getDisassemblyCode(Program program, Function function) {
+    private McpSchema.CallToolResult getDisassemblyCode(Program program, Function function, TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
         StringBuilder result = new StringBuilder();
         result.append("Disassembly of function: ").append(function.getName(true)).append("\n");
         result.append("Entry Point: ").append(function.getEntryPoint()).append("\n\n");
@@ -212,6 +236,7 @@ public class GetCodeTool implements McpTool {
 
         int instructionCount = 0;
         while (instrIter.hasNext()) {
+            monitor.checkCancelled();
             Instruction instruction = instrIter.next();
 
             result.append(instruction.getAddress()).append(": ");
@@ -247,24 +272,28 @@ public class GetCodeTool implements McpTool {
     /**
      * Get P-Code representation for a function.
      */
-    private McpSchema.CallToolResult getPcodeRepresentation(Program program, Function function, boolean raw) {
+    private McpSchema.CallToolResult getPcodeRepresentation(Program program, Function function, boolean raw, int timeout, TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
         StringBuilder result = new StringBuilder();
         result.append("P-Code for: ").append(function.getName(true))
               .append(" @ ").append(function.getEntryPoint()).append("\n\n");
 
         try (DecompilerSession session = decompilerService.open(program)) {
+            monitor.checkCancelled();
             DecompileResults results = session.decompiler().decompileFunction(function,
-                session.options().getDefaultTimeout(), TaskMonitor.DUMMY);
+                timeout, monitor);
+            monitor.checkCancelled();
 
             if (!results.decompileCompleted()) {
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("Decompilation failed for function: " + function.getName(true))
+                    .isError(true)
+                    .addTextContent("Decompilation " + (results.isTimedOut() ? "timed out" : "failed") + " for function: " + function.getName(true) + ": " + results.getErrorMessage())
                     .build();
             }
 
             HighFunction highFunction = results.getHighFunction();
             if (highFunction == null) {
                 return McpSchema.CallToolResult.builder()
+                    .isError(true)
                     .addTextContent("Could not get high function for: " + function.getName(true))
                     .build();
             }
@@ -275,6 +304,7 @@ public class GetCodeTool implements McpTool {
                 result.append("## Raw P-Code Operations:\n```\n");
                 Iterator<PcodeOpAST> ops = highFunction.getPcodeOps();
                 while (ops.hasNext()) {
+                    monitor.checkCancelled();
                     PcodeOpAST op = ops.next();
                     result.append(op.getSeqnum().getTarget()).append(": ")
                           .append(op.toString()).append("\n");
@@ -286,6 +316,7 @@ public class GetCodeTool implements McpTool {
                 var blocks = highFunction.getBasicBlocks();
 
                 for (var block : blocks) {
+                    monitor.checkCancelled();
                     if (block instanceof PcodeBlockBasic basicBlock) {
                         result.append("### Block ").append(basicBlock.getIndex())
                               .append(" @ ").append(basicBlock.getStart()).append("\n");
@@ -293,6 +324,7 @@ public class GetCodeTool implements McpTool {
 
                         Iterator<PcodeOp> blockOps = basicBlock.getIterator();
                         while (blockOps.hasNext()) {
+                            monitor.checkCancelled();
                             PcodeOp op = blockOps.next();
                             result.append("  ").append(op.toString()).append("\n");
                         }

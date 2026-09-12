@@ -9,6 +9,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 
 import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
@@ -25,7 +26,8 @@ public class McpCache {
     private final Map<String, CacheEntry> cache = new ConcurrentHashMap<>();
     private final int maxEntries;
     private final long maxAgeMs;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper = new ObjectMapper()
+        .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
 
     private final AtomicLong hitCount = new AtomicLong(0);
     private final AtomicLong missCount = new AtomicLong(0);
@@ -56,20 +58,13 @@ public class McpCache {
 
     public String generateKey(String toolName, Map<String, Object> arguments, String programName,
             String discriminator) {
-        StringBuilder keyBuilder = new StringBuilder();
-        keyBuilder.append(toolName).append(":");
-        keyBuilder.append(programName).append(":");
-        keyBuilder.append(discriminator != null ? discriminator : "").append(":");
-
-        // Sort and serialize arguments for consistent key generation
+        // Keep canonical arguments in the identity: a 32-bit hash can alias different queries.
         try {
-            String argsJson = objectMapper.writeValueAsString(arguments);
-            keyBuilder.append(argsJson.hashCode());
+            return objectMapper.writeValueAsString(java.util.Arrays.asList(
+                toolName, programName, discriminator, arguments));
         } catch (JsonProcessingException e) {
-            keyBuilder.append(arguments.hashCode());
+            throw new IllegalArgumentException("Cannot serialize cache arguments", e);
         }
-
-        return keyBuilder.toString();
     }
 
     /**
@@ -122,13 +117,16 @@ public class McpCache {
      * @param program The current program
      */
     public void put(String key, McpSchema.CallToolResult result, Program program) {
+        put(key, result, program != null ? program.getName() : "",
+            program != null ? program.getModificationNumber() : 0);
+    }
+
+    public void put(String key, McpSchema.CallToolResult result, String programName, long modNum) {
+        if (result == null || Boolean.TRUE.equals(result.isError())) return;
         // Enforce size limit
         if (cache.size() >= maxEntries) {
             evictOldest();
         }
-
-        String programName = program != null ? program.getName() : "";
-        long modNum = program != null ? program.getModificationNumber() : 0;
 
         CacheEntry entry = new CacheEntry(key, result, programName, modNum);
         cache.put(key, entry);
