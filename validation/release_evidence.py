@@ -3,6 +3,11 @@
 import argparse, hashlib, io, json, pathlib, subprocess, zipfile, xml.etree.ElementTree as ET
 
 def digest(data): return hashlib.sha256(data).hexdigest()
+def git_output(root, *args):
+    try:
+        return subprocess.check_output(['git', *args], cwd=root, text=True, stderr=subprocess.STDOUT).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument('--archive',required=True); ap.add_argument('--output',required=True)
     args=ap.parse_args(); root=pathlib.Path(__file__).resolve().parents[1]; archive=pathlib.Path(args.archive).resolve()
@@ -18,7 +23,16 @@ def main():
         suites.append({'suite':suite.get('name'),**counts,'sha256':digest(p.read_bytes())})
     guide=(root/'src/main/resources/ghidrassistmcp/operating-guide.md').read_bytes()
     with zipfile.ZipFile(archive) as z:
-        names=z.namelist(); forbidden=[n for n in names if any('/'+part+'/' in '/'+n for part in ['claude-code-integration','grok-integration','.claude-plugin','.agents','validation','build'])]
+        names=z.namelist()
+        forbidden_roots={'claude-code-integration','grok-integration','codex-integration','.claude-plugin','.agents','validation','build','docs'}
+        extension_root = next((pathlib.PurePosixPath(n).parts[0] for n in names
+                               if n.endswith('/lib/GhidrAssistMCP.jar')), None)
+        forbidden=[]
+        for n in names:
+            parts=pathlib.PurePosixPath(n).parts
+            relative=parts[1:] if extension_root and parts and parts[0] == extension_root else parts
+            if relative and (relative[0] in forbidden_roots or relative[0] == 'CLAUDE.md'): forbidden.append(n)
+        empty_entries=[n for n in names if n.endswith('/')]
         jars=[n for n in names if n.endswith('/lib/GhidrAssistMCP.jar')]
         if len(jars)!=1: raise ValueError('Expected one runtime JAR')
         jar=z.read(jars[0]); dependencies=[{'path':n,'sha256':digest(z.read(n))} for n in names if n.endswith('.jar')]
@@ -26,13 +40,27 @@ def main():
             packaged_guide=j.read('ghidrassistmcp/operating-guide.md')
             properties=j.read('build-info.properties').decode('latin1')
             cls=j.read('ghidrassistmcp/GhidrAssistMCPBackend.class'); major=int.from_bytes(cls[6:8],'big')
+    source_sha256=source_hash.hexdigest()
+    revision=git_output(root,'rev-parse','HEAD')
+    source_status=git_output(root,'status','--porcelain','--','src/main','build.gradle','extension.properties')
+    toolchain={k: next((line.split('=',1)[1] for line in properties.splitlines() if line.startswith(k+'=')), 'unknown')
+               for k in ['java_version','gradle_version','ghidra_version']}
+    build_properties=dict(line.split('=',1) for line in properties.splitlines() if '=' in line)
+    provenance_ok=(build_properties.get('source_sha256') == source_sha256)
+    if revision is not None:
+        provenance_ok = provenance_ok and build_properties.get('revision') == revision
+    if source_status is not None:
+        provenance_ok = provenance_ok and build_properties.get('dirty') == str(bool(source_status)).lower()
     report={'schema_version':1,'validation_level':'source-and-packaged-fixtures','installed_runtime_verified':False,
-        'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),
+        'head':revision or 'unknown','revision_known':revision is not None,
+        'source_dirty':('unknown' if source_status is None else bool(source_status)),
+        'source_inputs':['src/main/**','build.gradle','extension.properties'],'toolchain':toolchain,
         'archive':str(archive),'archive_sha256':digest(archive.read_bytes()),'runtime_jar_sha256':digest(jar),
-        'source_sha256':source_hash.hexdigest(),'source_manifest':manifest,'dependencies':dependencies,
+        'source_sha256':source_sha256,'source_manifest':manifest,'dependencies':dependencies,
         'build_properties':properties,'java_class_major':major,'packaged_guide_matches':guide==packaged_guide,
-        'forbidden_archive_paths':forbidden,'tests':tests,'test_suites':suites}
-    report['artifact_checks_passed']=not forbidden and guide==packaged_guide and major==65 and ('source_sha256='+source_hash.hexdigest()) in properties
+        'forbidden_archive_paths':forbidden,'empty_archive_entries':empty_entries,'tests':tests,'test_suites':suites}
+    report['artifact_checks_passed']=not forbidden and not empty_entries
+    report['artifact_checks_passed'] = report['artifact_checks_passed'] and guide==packaged_guide and major==65 and provenance_ok
     destination=pathlib.Path(args.output);destination.parent.mkdir(parents=True,exist_ok=True);destination.write_text(json.dumps(report,indent=2),encoding='utf-8')
     print(json.dumps({k:report[k] for k in ['archive_sha256','source_sha256','artifact_checks_passed','tests']}))
     return 0 if report['artifact_checks_passed'] and tests['tests'] and not tests['failures'] and not tests['errors'] else 1

@@ -39,6 +39,10 @@ class RuntimeCapabilitiesResourceTest {
             assertEquals(backend.getAllTools().size(), body.get("registered_tools"));
             assertEquals("2025-11-25", ((Map<?, ?>) body.get("protocol")).get("latest_supported_revision"));
             assertEquals(false, ((Map<?, ?>) body.get("protocol")).get("tasks_extension"));
+            Map<?, ?> buildInfo = (Map<?, ?>) body.get("build_info");
+            for (String key : java.util.List.of("java_version", "gradle_version", "ghidra_version")) {
+                if (buildInfo.containsKey(key)) assertInstanceOf(String.class, buildInfo.get(key));
+            }
             assertNotNull(backend.getAvailableTools().stream().filter(t -> t.name().equals("runtime_capabilities")).findFirst().orElseThrow().outputSchema());
         } finally { backend.getTaskManager().shutdown(); }
     }

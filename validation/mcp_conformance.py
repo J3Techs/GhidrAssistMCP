@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Small read-only MCP HTTP conformance probe (stdlib only)."""
 import argparse, json, pathlib, time, urllib.request, urllib.error
+from urllib.parse import quote
 
 class Client:
     def __init__(self, endpoint): self.endpoint, self.sid, self.i = endpoint, None, 0
@@ -46,6 +47,22 @@ class Client:
             except Exception: pass
         return out
 
+def structured(response):
+    return (response.get("response") or {}).get("result",{}).get("structuredContent",{})
+
+def await_operation(client, initial):
+    """Return (result envelope to inspect, optional wait trace) for sync/async tools."""
+    body=structured(initial)
+    task_id=body.get("task_id") if isinstance(body,dict) else None
+    if not task_id:
+        return initial, None
+    wait=client.call("tools/call",{"name":"wait_task","arguments":
+        {"task_id":task_id,"include_result":True,"timeout_ms":30000}})
+    wait_body=structured(wait)
+    return {"response":{"result":{"structuredContent":wait_body}},"ok":
+            wait["ok"] and wait_body.get("wait_outcome")=="terminal"
+            and wait_body.get("result_status")=="included"}, wait
+
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument("--endpoint",required=True); ap.add_argument("--output",required=True); ap.add_argument("--fixture-ready")
     a=ap.parse_args(); checks=[]; started=time.time(); fixture=None
@@ -70,6 +87,62 @@ def main():
         resources=resource_list.get("response",{}).get("result",{}).get("resources",[]) if resource_list["ok"] else []
         if resources:
             uri=resources[0].get("uri"); rr=c.call("resources/read",{"uri":uri}); checks.append({"name":"resources/read","result":rr,"ok":rr["ok"]})
+        if fixture:
+            # Fixture-only selector checks use the manifest's exact opaque IDs
+            # and names; no production/live program names are guessed.
+            fprograms=fixture.get("programs",[])
+            fpath=None
+            listed=next((x.get("result",{}).get("response",{}).get("result",{}).get("structuredContent",{})
+                         for x in checks if x.get("name")=="tools/call"
+                         and x.get("result",{}).get("response",{}).get("result",{}).get("structuredContent",{}).get("programs") is not None),{})
+            rows=listed.get("programs",[])
+            if fprograms and rows:
+                fpath=next((row.get("project_path") for row in rows
+                            if row.get("program_id")==fprograms[0].get("program_id")),None)
+            page2=c.call("tools/call",{"name":"list_binaries","arguments":{"limit":1,"offset":1}})
+            checks.append({"name":"fixture_discovery_page2","result":page2,"ok":page2["ok"]})
+            search_tool=next((t for t in tools if t.get("name")=="search_bytes"),None)
+            if search_tool and fprograms:
+                expected=fprograms[0].get("program_id")
+                def selector_probe(check_name, selector, expected_id):
+                    probe=c.call("tools/call",{"name":"search_bytes","arguments":
+                        {"pattern":"00","limit":1,"program_name":selector}})
+                    effective, wait=await_operation(c,probe)
+                    body=structured(effective)
+                    rows=[{"name":check_name,"result":probe,
+                            "ok":probe["ok"] and (bool(structured(probe).get("task_id")) or body.get("program_id")==expected_id)}]
+                    if wait is not None:
+                        rows.append({"name":check_name+"_wait","result":wait,"ok":effective["ok"] and body.get("operation_result",{}).get("program_id")==expected_id})
+                    return rows
+                checks.extend(selector_probe("fixture_selector_program_name",fprograms[0].get("name"),expected))
+                if fpath:
+                    checks.extend(selector_probe("fixture_selector_project_path",fpath,expected))
+                spaced=next((p for p in fprograms if "space # selector" in p.get("name", "")),None)
+                if spaced:
+                    checks.extend(selector_probe("fixture_selector_spaced_name",spaced.get("name"),spaced.get("program_id")))
+                    encoded=quote(spaced["name"],safe="")
+                    encoded_uri="ghidra://program/"+encoded+"/info"
+                    encoded_read=c.call("resources/read",{"uri":encoded_uri})
+                    checks.append({"name":"fixture_resource_percent_encoded_selector",
+                        "result":encoded_read,"ok":encoded_read["ok"]})
+                # Verify the documented alias resolves to the same selected
+                # program when both selector keys are advertised.
+                props=search_tool.get("inputSchema",{}).get("properties",{})
+                if "program" in props:
+                    alias=c.call("tools/call",{"name":"search_bytes","arguments":
+                        {"pattern":"00","limit":1,"program":fprograms[0].get("name")}})
+                    alias_body=(alias.get("response") or {}).get("result",{}).get("structuredContent",{})
+                    checks.append({"name":"fixture_program_alias_matches_program_name",
+                        "result":alias,"ok":alias["ok"] and alias_body.get("program_id")==expected})
+            tool_names={t.get("name") for t in tools}
+            if {"get_binary_info", "get_program_info"}.issubset(tool_names):
+                canonical=c.call("tools/call",{"name":"get_binary_info","arguments":{}})
+                alias=c.call("tools/call",{"name":"get_program_info","arguments":{}})
+                ctext=json.dumps((canonical.get("response") or {}).get("result",{}),sort_keys=True)
+                atext=json.dumps((alias.get("response") or {}).get("result",{}),sort_keys=True)
+                checks.append({"name":"fixture_tool_alias_get_program_info",
+                    "result":{"canonical":canonical,"alias":alias},
+                    "ok":canonical["ok"] and alias["ok"] and ctext==atext})
         missing=c.call("tools/call",{"name":"get_binary_info","arguments":{"program_id":"missing-program-id"}}); checks.append({"name":"missing_selector","result":missing,"ok":not missing["ok"] and "missing-program-id" in json.dumps(missing.get("response",{}))})
         exact=None
         programs=next((c["result"].get("response",{}).get("result",{}).get("structuredContent",{}).get("programs",[]) for c in checks if c["name"]=="tools/call" and c["result"].get("response",{}).get("result",{}).get("structuredContent",{}).get("programs") is not None),[])

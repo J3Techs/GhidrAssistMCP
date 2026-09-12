@@ -136,7 +136,11 @@ tasks.register('checkOperatingGuides') {
 tasks.named('check') { dependsOn 'checkOperatingGuides' }
 tasks.named('buildExtension') {
     dependsOn 'checkOperatingGuides'
-    exclude '.claude-plugin/**', 'claude-code-integration/**', 'grok-integration/**', '.agents/**', 'validation/**'
+    // Client wrappers, local evidence, internal documentation and repository
+    // instructions are distributed separately from the runtime extension.
+    exclude '.claude-plugin/**', 'claude-code-integration/**', 'grok-integration/**',
+        'codex-integration/**', '.agents/**', 'validation/**', 'docs/**', 'CLAUDE.md'
+    includeEmptyDirs = false
 }
 
 def generatedBuildInfo = layout.buildDirectory.dir('generated/build-info')
@@ -145,8 +149,16 @@ tasks.register('generateBuildInfo') {
     outputs.upToDateWhen { false }
     doLast {
         def props = new Properties()
-        props.setProperty('revision', providers.exec { commandLine 'git', 'rev-parse', 'HEAD' }.standardOutput.asText.get().trim())
-        props.setProperty('dirty', (!providers.exec { commandLine 'git', 'status', '--porcelain' }.standardOutput.asText.get().trim().isEmpty()).toString())
+        def gitRun = { List<String> arguments ->
+            try {
+                return providers.exec { commandLine(['git'] + arguments) }.standardOutput.asText.get().trim()
+            }
+            catch (Exception ignored) {
+                return null
+            }
+        }
+        def revision = gitRun(['rev-parse', 'HEAD'])
+        props.setProperty('revision', revision ?: 'unknown')
         props.setProperty('built_at', java.time.Instant.now().toString())
         def digest = java.security.MessageDigest.getInstance('SHA-256')
         def sourceInputs = (fileTree('src/main').files + [file('build.gradle'), file('extension.properties')]).sort { relativePath(it).replace('\\', '/') }
@@ -156,7 +168,23 @@ tasks.register('generateBuildInfo') {
             digest.update(input.bytes)
             digest.update((byte) 0)
         }
-        props.setProperty('source_sha256', java.util.HexFormat.of().formatHex(digest.digest()))
+        def sourceSha256 = java.util.HexFormat.of().formatHex(digest.digest())
+        props.setProperty('source_sha256', sourceSha256)
+        // Keep this pathspec list identical to the digest input set without
+        // expanding every source file into the Git command line.
+        def status = gitRun(['status', '--porcelain', '--', 'src/main', 'build.gradle', 'extension.properties'])
+        props.setProperty('dirty', status == null ? 'unknown' : (!status.isEmpty()).toString())
+        props.setProperty('java_version', System.getProperty('java.version', 'unknown'))
+        props.setProperty('gradle_version', gradle.gradleVersion ?: 'unknown')
+        def ghidraProperties = file(ghidraInstallDir).toPath().resolve('Ghidra/application.properties').toFile()
+        if (ghidraProperties.isFile()) {
+            def ghidra = new Properties()
+            ghidraProperties.withInputStream { ghidra.load(it) }
+            props.setProperty('ghidra_version', ghidra.getProperty('application.version', 'unknown'))
+        }
+        else {
+            props.setProperty('ghidra_version', 'unknown')
+        }
         def destination = generatedBuildInfo.get().file('build-info.properties').asFile
         destination.parentFile.mkdirs()
         destination.withOutputStream { props.store(it, 'GhidrAssistMCP build provenance') }

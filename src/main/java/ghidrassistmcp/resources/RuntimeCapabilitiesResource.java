@@ -86,7 +86,7 @@ public final class RuntimeCapabilitiesResource implements McpResource {
         try (InputStream in = getClass().getClassLoader().getResourceAsStream("build-info.properties")) {
             if (in == null) { info.put("available", false); return info; }
             var props = new java.util.Properties(); props.load(in); info.put("available", true);
-            for (String key : List.of("revision", "dirty", "built_at", "source_sha256")) if (props.containsKey(key)) info.put(key, props.getProperty(key));
+            for (String key : List.of("revision", "dirty", "built_at", "source_sha256", "java_version", "gradle_version", "ghidra_version")) if (props.containsKey(key)) info.put(key, props.getProperty(key));
         } catch (Exception e) { info.put("available", false); info.put("error", "build info unavailable"); }
         return info;
     }

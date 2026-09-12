@@ -43,7 +43,7 @@ public final class RuntimeCapabilitiesTool implements McpTool {
         properties.put("program_count", Map.of("type", "integer", "minimum", 0));
         properties.put("active_program_id", nullableText);
         properties.put("program_id_collisions", strings);
-        properties.put("build_info", object(Map.of("available", bool, "revision", text, "dirty", text, "built_at", text, "source_sha256", text, "error", text), List.of("available")));
+        properties.put("build_info", object(Map.of("available", bool, "revision", text, "dirty", text, "built_at", text, "source_sha256", text, "java_version", text, "gradle_version", text, "ghidra_version", text, "error", text), List.of("available")));
         var protocol = Map.<String, Object>of("sdk_version", text, "latest_supported_revision", text,
             "supported_revisions", strings, "stateless_2026_07_28", bool, "tasks_extension", bool, "application_task_api", strings);
         properties.put("protocol", object(protocol, List.copyOf(protocol.keySet())));
