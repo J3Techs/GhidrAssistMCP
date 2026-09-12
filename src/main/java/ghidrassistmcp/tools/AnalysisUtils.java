@@ -151,6 +151,12 @@ final class AnalysisUtils {
         if (manager.isAnalyzing()) throw new IllegalStateException("Analysis is already active; wait before applying per-call options.");
         return withTemporaryOptions(program, optionOverrides, () -> {
         long start = System.currentTimeMillis();
+        // Without a PluginTool, AutoAnalysisManager runs synchronously in this
+        // caller and does not open a transaction. Native HeadlessAnalyzer owns
+        // one across scheduling, analyzer writes, and saved analyzer timings.
+        // GUI background analysis already owns its transaction.
+        Integer analysisTx = manager.getAnalysisTool() == null
+            ? program.startTransaction("MCP Auto Analysis") : null;
         try {
         activeMonitor.setMessage("Starting analysis");
         if (MODE_CHANGES.equals(normalizedMode)) {
@@ -166,6 +172,7 @@ final class AnalysisUtils {
         activeMonitor.setMessage("Waiting for analysis");
         manager.waitForAnalysis(null, activeMonitor);
         } finally {
+            try {
             // A cancelled waiter does not prove native analysis has stopped. Keep ownership
             // and temporary settings until the actual analysis thread is finished.
             boolean interrupted = Thread.interrupted();
@@ -175,6 +182,11 @@ final class AnalysisUtils {
                 catch (InterruptedException e) { interrupted = true; activeMonitor.cancel(); }
             }
             if (interrupted) Thread.currentThread().interrupt();
+            } finally {
+                // Match native headless analysis: retain completed analysis work
+                // on cancellation/failure. Persistence still requires save_program.
+                if (analysisTx != null) program.endTransaction(analysisTx, true);
+            }
         }
         if (activeMonitor.isCancelled() || Thread.currentThread().isInterrupted())
             throw new java.util.concurrent.CancellationException("Analysis cancelled; temporary options restored after execution stopped.");

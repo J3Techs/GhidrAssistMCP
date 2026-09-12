@@ -20,6 +20,8 @@ The server script accepts both `key=value` and separate `key value` options. Ghi
 
 **Save before shutdown.** Edits live in memory until `save_program` succeeds; VT additionally requires `vt_session(action=save)`. Stopping the server or supplying a completion file does not save every database. Unsaved objects are reported in the shutdown log. `analyzeHeadless` may subsequently save its own processed seed program, but this does not save additional MCP-opened programs. `ignore_changes=true` releases an MCP handle; it cannot discard edits still retained by another consumer.
 
+Headless `analyze_program` owns a database transaction through native analysis and its completion cleanup, including analyzer timing writes. Both `full` and `changes` modes use this lifecycle; `open_program(analyze_after_open=true)` uses the same analysis tool. As in Ghidra's native headless runner, completed analysis work remains in memory after cancellation or failure, and temporary per-call options are restored after analysis stops. Inspect the result and use `save_program` to persist the desired state.
+
 Shutdown drains generic tasks and BSim work before releasing project-scoped VT sessions and program consumers. It reports failure instead of claiming completion if workers do not stop. Generic task records are memory-only and are lost on JVM restart; BSim has a separate persistent job journal.
 
 GUI cursor tools and `save_project_session` are disabled in the project backend. Interactive repository conflict resolution still uses Ghidra's merge UI. Repository credentials and remote BSim database availability remain prerequisites independent of CodeBrowser. The default security settings for host imports, script execution and exports are preserved.
