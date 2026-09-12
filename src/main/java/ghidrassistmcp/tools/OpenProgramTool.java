@@ -62,7 +62,10 @@ public class OpenProgramTool implements McpTool {
                 )),
                 Map.entry("name", Map.of(
                     "type", "string",
-                    "description", "Program name or full project path to open (required for action 'open'). Supports partial name matching."
+                    "description", "Exact program name or full project path to open (required for action 'open')."
+                )),
+                Map.entry("version", Map.of(
+                    "type", "integer", "description", "Optional checked-in version to open read-only; omit for the current version."
                 )),
                 Map.entry("folder", Map.of(
                     "type", "string",
@@ -94,26 +97,27 @@ public class OpenProgramTool implements McpTool {
 
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
-        return textResult("This tool requires backend context (project access).");
+        return ProjectToolSupport.error("This tool requires backend context (project access).");
     }
 
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram,
                                             GhidrAssistMCPBackend backend) {
+        if (backend != null && backend.isHeadlessSession()) return executeHeadless(arguments, backend);
         GhidrAssistMCPManager manager = GhidrAssistMCPManager.getInstance();
         PluginTool pluginTool = manager.getActiveTool();
         if (pluginTool == null) {
-            return textResult("No active Ghidra tool/window available.");
+            return ProjectToolSupport.error("No active Ghidra tool/window available.");
         }
 
         Project project = pluginTool.getProject();
         if (project == null) {
-            return textResult("No Ghidra project is open.");
+            return ProjectToolSupport.error("No Ghidra project is open.");
         }
 
         String action = (String) arguments.get("action");
         if (action == null || action.isEmpty()) {
-            return textResult("action parameter is required: 'list' or 'open'");
+            return ProjectToolSupport.error("action parameter is required: 'list' or 'open'");
         }
 
         DomainFolder rootFolder = project.getProjectData().getRootFolder();
@@ -124,7 +128,7 @@ public class OpenProgramTool implements McpTool {
             case "open":
                 return openProgram(rootFolder, arguments, pluginTool, backend);
             default:
-                return textResult("Invalid action: " + action + ". Use 'list' or 'open'.");
+                return ProjectToolSupport.error("Invalid action: " + action + ". Use 'list' or 'open'.");
         }
     }
 
@@ -134,7 +138,7 @@ public class OpenProgramTool implements McpTool {
         if (folderPath != null && !folderPath.isBlank() && !"/".equals(folderPath)) {
             DomainFolder folder = rootFolder.getFolder(folderPath.replaceFirst("^/", ""));
             if (folder == null) {
-                return textResult("Folder not found: " + folderPath);
+                return ProjectToolSupport.error("Folder not found: " + folderPath);
             }
             collectFiles(folder, files);
         } else {
@@ -165,21 +169,11 @@ public class OpenProgramTool implements McpTool {
                                                   GhidrAssistMCPBackend backend) {
         String name = (String) arguments.get("name");
         if (name == null || name.isBlank()) {
-            return textResult("'name' is required for action 'open'.");
+            return ProjectToolSupport.error("'name' is required for action 'open'.");
         }
 
-        // Check if already open
-        List<Program> openPrograms = backend.getAllOpenPrograms();
-        for (Program p : openPrograms) {
-            DomainFile domainFile = p.getDomainFile();
-            String pPath = domainFile != null ? domainFile.getPathname() : "";
-            if (p.getName().equalsIgnoreCase(name) || pPath.equalsIgnoreCase(name)) {
-                StringBuilder sb = new StringBuilder();
-                sb.append("Program '").append(p.getName()).append("' is already open in CodeBrowser.\n");
-                sb.append(maybeSubmitAnalysis(p, arguments, backend));
-                return textResult(sb.toString().trim());
-            }
-        }
+        Integer requestedVersion = integerArg(arguments.get("version"));
+        if (arguments.containsKey("version") && requestedVersion == null) return ProjectToolSupport.error("version must be an integer");
 
         // Find the file in the project
         List<DomainFile> allFiles = new ArrayList<>();
@@ -188,30 +182,53 @@ public class OpenProgramTool implements McpTool {
         DomainFile match = findFile(allFiles, name);
 
         if (match == null) {
-            return textResult("Program not found: '" + name +
+            return ProjectToolSupport.error("Program not found: '" + name +
                 "'. Use action 'list' to see available programs.");
+        }
+
+        // Resolve the exact project file before consulting open instances. An old
+        // historical view must never satisfy a request for the current version.
+        List<Program> openPrograms = backend.getAllOpenPrograms();
+        for (Program p : openPrograms) {
+            DomainFile domainFile = p.getDomainFile();
+            String pPath = domainFile != null ? domainFile.getPathname() : "";
+            int expectedVersion = requestedVersion == null ? match.getVersion() : requestedVersion;
+            if (domainFile != null && pPath.equals(match.getPathname()) && domainFileVersion(p) == expectedVersion) {
+                if (requestedVersion != null && getBoolean(arguments, "analyze_after_open", false)) return ProjectToolSupport.error("analyze_after_open is not allowed for historical versions");
+                StringBuilder sb = new StringBuilder("Program '").append(p.getName()).append("' is already open in CodeBrowser.\n");
+                sb.append(maybeSubmitAnalysis(p, arguments, backend));
+                return textResult(sb.toString().trim());
+            }
         }
 
         // Open it in CodeBrowser
         ProgramManager pm = pluginTool.getService(ProgramManager.class);
         if (pm == null) {
-            return textResult("ProgramManager service not available. Is CodeBrowser open?");
+            return ProjectToolSupport.error("ProgramManager service not available. Is CodeBrowser open?");
         }
 
         Program program = null;
+        boolean acquiredConsumer = false;
         try {
-            program = (Program) match.getDomainObject(
-                this, false, false, TaskMonitor.DUMMY);
-
-            if (getBoolean(arguments, "suppress_analysis_prompt", true)) {
-                AnalysisUtils.setAskToAnalyze(program, false);
+            if (requestedVersion != null) {
+                if (getBoolean(arguments, "analyze_after_open", false)) return ProjectToolSupport.error("analyze_after_open is not allowed for historical versions");
+                if (requestedVersion < 0 || requestedVersion > match.getLatestVersion()) {
+                    return ProjectToolSupport.error("Version " + requestedVersion + " is unavailable; latest is " + match.getLatestVersion());
+                }
+                program = pm.openProgram(match, requestedVersion, ProgramManager.OPEN_CURRENT);
+                if (program == null) return ProjectToolSupport.error("Ghidra could not open historical version " + requestedVersion + " of '" + match.getPathname() + "'.");
             }
-
-            pm.openProgram(program);
+            else {
+                program = (Program) match.getDomainObject(this, false, false, TaskMonitor.DUMMY);
+                acquiredConsumer = true;
+                if (getBoolean(arguments, "suppress_analysis_prompt", true)) AnalysisUtils.setAskToAnalyze(program, false);
+                pm.openProgram(program);
+            }
 
             StringBuilder sb = new StringBuilder();
             sb.append("Opened '").append(match.getName()).append("' (").append(match.getPathname())
               .append(") in CodeBrowser.\n");
+            if (requestedVersion != null) sb.append("Version: ").append(requestedVersion).append(" (read-only historical view)\n");
             sb.append("Language: ").append(program.getLanguageID()).append("\n");
             sb.append("Image Base: ").append(program.getImageBase()).append("\n");
             sb.append("Should Ask To Analyze: ").append(AnalysisUtils.shouldAskToAnalyze(program)).append("\n");
@@ -219,9 +236,9 @@ public class OpenProgramTool implements McpTool {
             return textResult(sb.toString().trim());
         } catch (Exception e) {
             Msg.error(this, "Failed to open program: " + match.getName(), e);
-            return textResult("Failed to open '" + match.getName() + "': " + e.getMessage());
+            return ProjectToolSupport.error("Failed to open '" + match.getName() + "': " + e.getMessage());
         } finally {
-            if (program != null) {
+            if (program != null && acquiredConsumer) {
                 program.release(this);
             }
         }
@@ -264,44 +281,52 @@ public class OpenProgramTool implements McpTool {
         return defaultValue;
     }
 
+    private McpSchema.CallToolResult executeHeadless(Map<String,Object> arguments, GhidrAssistMCPBackend backend) {
+        if (!(backend.getProject() instanceof Project project)) return ProjectToolSupport.error("No headless project is bound.");
+        String action = arguments.get("action") instanceof String s ? s.toLowerCase() : "";
+        if ("list".equals(action)) return listPrograms(project.getProjectData().getRootFolder(), (String) arguments.get("folder"));
+        if (!"open".equals(action)) return ProjectToolSupport.error("Invalid action: " + action + ". Use 'list' or 'open'.");
+        String name = arguments.get("name") instanceof String s ? s : null;
+        if (name == null || name.isBlank()) return ProjectToolSupport.error("'name' is required for action 'open'.");
+        List<DomainFile> files = new ArrayList<>(); collectFiles(project.getProjectData().getRootFolder(), files);
+        DomainFile file = findFile(files, name);
+        if (file == null) return ProjectToolSupport.error("Program not found or selector is ambiguous: '" + name + "'.");
+        Integer version = integerArg(arguments.get("version"));
+        if (arguments.containsKey("version") && version == null) return ProjectToolSupport.error("version must be an integer");
+        if (version != null && (version < 1 || version > file.getLatestVersion())) return ProjectToolSupport.error("Requested historical version is unavailable");
+        if (version != null && getBoolean(arguments, "analyze_after_open", false)) return ProjectToolSupport.error("analyze_after_open is not allowed for historical versions");
+        try {
+            Program program = backend.openProjectProgram(file, version == null ? DomainFile.DEFAULT_VERSION : version, TaskMonitor.DUMMY);
+            return textResult("Opened '" + file.getPathname() + "' in headless mode" + (version == null ? "" : " (historical version " + version + ")") + "\n" + maybeSubmitAnalysis(program, arguments, backend));
+        } catch (Exception e) { return ProjectToolSupport.error("Failed to open '" + file.getPathname() + "': " + e.getMessage()); }
+    }
+
+    private Integer integerArg(Object value) {
+        if (value instanceof Integer n) return n;
+        if (value instanceof Long n && n >= Integer.MIN_VALUE && n <= Integer.MAX_VALUE) return n.intValue();
+        if (value instanceof String s && s.matches("[0-9]+")) try { return Integer.valueOf(s); } catch (NumberFormatException ignored) { }
+        return null;
+    }
+
+    private int domainFileVersion(Program program) {
+        return program.getDomainFile() == null ? -1 : program.getDomainFile().getVersion();
+    }
+
     /**
      * Find a file by full project path or name, with exact, case-insensitive,
      * then partial matching. Full pathname (e.g. "/banks/bank00.bin") is tried
      * before plain name so that callers can paste directly from the 'list' output.
      */
     private DomainFile findFile(List<DomainFile> files, String name) {
-        // Exact pathname match (e.g. "/banks/bank00.bin")
-        for (DomainFile df : files) {
-            if (df.getPathname().equals(name)) {
-                return df;
-            }
-        }
-        // Exact name match (e.g. "bank00.bin")
-        for (DomainFile df : files) {
-            if (df.getName().equals(name)) {
-                return df;
-            }
-        }
-        // Case-insensitive pathname match
-        for (DomainFile df : files) {
-            if (df.getPathname().equalsIgnoreCase(name)) {
-                return df;
-            }
-        }
-        // Case-insensitive name match
-        for (DomainFile df : files) {
-            if (df.getName().equalsIgnoreCase(name)) {
-                return df;
-            }
-        }
-        // Partial name match (contains)
-        String lowerName = name.toLowerCase();
-        for (DomainFile df : files) {
-            if (df.getName().toLowerCase().contains(lowerName)) {
-                return df;
-            }
-        }
-        return null;
+        List<DomainFile> exactPath = files.stream().filter(df -> df.getPathname().equals(name)).toList();
+        if (exactPath.size() == 1) return exactPath.get(0);
+        if (exactPath.size() > 1) return null;
+        List<DomainFile> exactName = files.stream().filter(df -> df.getName().equals(name)).toList();
+        if (exactName.size() == 1) return exactName.get(0);
+        if (exactName.size() > 1) return null;
+        List<DomainFile> insensitive = files.stream().filter(df ->
+            df.getPathname().equalsIgnoreCase(name) || df.getName().equalsIgnoreCase(name)).toList();
+        return insensitive.size() == 1 ? insensitive.get(0) : null;
     }
 
     private void collectFiles(DomainFolder folder, List<DomainFile> result) {

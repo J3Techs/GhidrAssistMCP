@@ -10,6 +10,7 @@ import ghidra.framework.model.DomainFile;
 import ghidra.program.model.listing.Program;
 import ghidrassistmcp.GhidrAssistMCPBackend;
 import ghidrassistmcp.McpTool;
+import ghidrassistmcp.ProgramIdentity;
 import io.modelcontextprotocol.spec.McpSchema;
 
 /**
@@ -81,6 +82,9 @@ public class ListProgramsTool implements McpTool {
 
             // Add program details
             result.append(String.format("   Project Path: %s\n", projectPath(p)));
+            result.append(String.format("   Program ID: %s\n", ProgramIdentity.id(p)));
+            result.append(String.format("   State: dirty=%s, changeable=%s, transaction_active=%s\n",
+                p.isChanged(), p.isChangeable(), p.getCurrentTransactionInfo() != null));
             result.append(String.format("   Executable Path: %s\n", p.getExecutablePath()));
             result.append(String.format("   Format: %s\n", p.getExecutableFormat()));
             result.append(String.format("   Language: %s\n", p.getLanguageID()));

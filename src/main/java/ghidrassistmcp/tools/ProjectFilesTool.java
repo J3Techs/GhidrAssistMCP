@@ -109,10 +109,12 @@ public class ProjectFilesTool implements McpTool {
 
     private McpSchema.CallToolResult perform(Map<String, Object> arguments,
             GhidrAssistMCPBackend backend, TaskMonitor monitor) {
-        Project project = getProject();
+        Project project = backend != null && backend.isHeadlessSession() ? backend.getProject() : getProject();
         if (project == null) {
             return textResult("No Ghidra project is open.");
         }
+        try { ProjectToolSupport.verifyProject(arguments, project); }
+        catch (Exception e) { return ProjectToolSupport.error(e.getMessage()); }
 
         String action = (String) arguments.get("action");
         if (action == null || action.isBlank()) {
@@ -122,7 +124,7 @@ public class ProjectFilesTool implements McpTool {
         DomainFolder root = project.getProjectData().getRootFolder();
         return switch (action.trim().toLowerCase()) {
             case "list" -> list(root, arguments);
-            case "delete" -> delete(root, arguments, backend);
+            case "delete" -> delete(root, arguments, backend, monitor);
             case "create_folder", "copy", "move", "rename" -> manage(root, action.trim().toLowerCase(), arguments, backend, monitor);
             default -> ProjectToolSupport.error("Invalid action: " + action);
         };
@@ -203,7 +205,7 @@ public class ProjectFilesTool implements McpTool {
             for (DomainFile file : current.getFiles()) {
                 monitor.checkCancelled();
                 if (++entries > 10000) throw new IllegalArgumentException("Folder operation exceeds 10000 entries; use smaller subfolders");
-                if (file.isBusy() || file.isChanged()) throw new IllegalArgumentException("Unsaved/busy file: " + file.getPathname());
+                if (file.isBusy() || file.isChanged() || file.isOpen()) throw new IllegalArgumentException("Unsaved, busy, or open file: " + file.getPathname());
             }
             for (DomainFolder child : current.getFolders()) {
                 if (pending.size() + entries >= 10000) throw new IllegalArgumentException("Folder operation exceeds 10000 entries; use smaller subfolders");
@@ -235,8 +237,9 @@ public class ProjectFilesTool implements McpTool {
     }
 
     private McpSchema.CallToolResult delete(DomainFolder root, Map<String, Object> arguments,
-                                            GhidrAssistMCPBackend backend) {
-        if (!Boolean.TRUE.equals(arguments.get("confirm"))) {
+                                            GhidrAssistMCPBackend backend, TaskMonitor monitor) {
+        boolean dryRun = Boolean.TRUE.equals(arguments.get("dry_run"));
+        if (!dryRun && !Boolean.TRUE.equals(arguments.get("confirm"))) {
             return textResult("Refusing to delete. Pass confirm=true to delete a project file or folder.");
         }
 
@@ -252,13 +255,18 @@ public class ProjectFilesTool implements McpTool {
 
         String targetType = stringArg(arguments.get("target_type"), "auto").toLowerCase();
         boolean recursive = Boolean.TRUE.equals(arguments.get("recursive"));
+        List<String> completed = new ArrayList<>();
 
         try {
             if ("file".equals(targetType) || "auto".equals(targetType)) {
                 DomainFile file = resolveFile(root, normalizedPath);
                 if (file != null) {
                     String deletedPath = file.getPathname();
+                    monitor.checkCancelled();
+                    if (file.isBusy() || file.isChanged() || file.isOpen()) return ProjectToolSupport.error("File is busy, open, or has unsaved changes: " + deletedPath);
+                    if (dryRun) return ProjectToolSupport.result(Map.of("action", "delete", "target", deletedPath, "target_type", "file", "dry_run", true));
                     file.delete();
+                    completed.add(deletedPath);
                     if (backend != null) {
                         backend.clearCache();
                     }
@@ -274,7 +282,13 @@ public class ProjectFilesTool implements McpTool {
                 if (folder == null) {
                     return textResult("Project folder not found: " + normalizedPath);
                 }
-                int deleted = deleteFolder(folder, recursive);
+                ensureStable(folder, monitor);
+                if (!recursive && !folder.isEmpty()) return ProjectToolSupport.error("Folder is not empty. Pass recursive=true to delete children.");
+                List<String> planned = new ArrayList<>();
+                collect(folder, recursive, planned);
+                if (dryRun) return ProjectToolSupport.result(Map.of("action", "delete", "target", normalizedPath,
+                    "target_type", "folder", "recursive", recursive, "entries", planned, "dry_run", true));
+                int deleted = deleteFolder(folder, recursive, monitor, completed);
                 if (backend != null) {
                     backend.clearCache();
                 }
@@ -285,13 +299,14 @@ public class ProjectFilesTool implements McpTool {
             return textResult("Invalid target_type: " + targetType + ". Use auto, file, or folder.");
         } catch (Exception e) {
             Msg.error(this, "Failed to delete project entry: " + normalizedPath, e);
-            return textResult("Failed to delete '" + normalizedPath + "': " +
-                e.getClass().getSimpleName() + ": " + e.getMessage() +
-                "\nIf the file is open in CodeBrowser, close it and try again.");
+            return ProjectToolSupport.result(Map.of("action", "delete", "target", normalizedPath,
+                "completed", completed, "failed", normalizedPath, "partial", !completed.isEmpty(),
+                "error", e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()),
+                "message", "If the file is open in CodeBrowser, close it and try again."), true);
         }
     }
 
-    private int deleteFolder(DomainFolder folder, boolean recursive) throws Exception {
+    private int deleteFolder(DomainFolder folder, boolean recursive, TaskMonitor monitor, List<String> completed) throws Exception {
         if (!recursive && !folder.isEmpty()) {
             throw new IllegalArgumentException("Folder is not empty. Pass recursive=true to delete children.");
         }
@@ -299,18 +314,21 @@ public class ProjectFilesTool implements McpTool {
         int deleted = 0;
         if (recursive) {
             for (DomainFile file : folder.getFiles()) {
+                monitor.checkCancelled();
                 file.delete();
+                completed.add(file.getPathname());
                 deleted++;
             }
 
             List<DomainFolder> children = new ArrayList<>(List.of(folder.getFolders()));
             children.sort(Comparator.comparing(DomainFolder::getPathname).reversed());
             for (DomainFolder child : children) {
-                deleted += deleteFolder(child, true);
+                deleted += deleteFolder(child, true, monitor, completed);
             }
         }
 
         folder.delete();
+        completed.add(folder.getPathname());
         return deleted + 1;
     }
 

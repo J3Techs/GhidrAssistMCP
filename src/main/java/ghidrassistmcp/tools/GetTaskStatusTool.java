@@ -67,8 +67,8 @@ public class GetTaskStatusTool implements McpTool {
                 .build();
         }
 
-        // If task is completed, return the actual result
-        if (task.getStatus() == McpTask.Status.COMPLETED && task.getResult() != null) {
+        // Return the retained operation payload for both successful and error outcomes.
+        if (task.isTerminal() && task.getResult() != null) {
             return task.getResult();
         }
 

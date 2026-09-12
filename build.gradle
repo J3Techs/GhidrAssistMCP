@@ -69,6 +69,23 @@ tasks.named('test') {
     systemProperty 'ghidra.install.dir', ghidraInstallDir
 }
 
+def generatedBuildInfo = layout.buildDirectory.dir('generated/build-info')
+tasks.register('generateBuildInfo') {
+    outputs.dir(generatedBuildInfo)
+    outputs.upToDateWhen { false }
+    doLast {
+        def props = new Properties()
+        props.setProperty('revision', providers.exec { commandLine 'git', 'rev-parse', 'HEAD' }.standardOutput.asText.get().trim())
+        props.setProperty('dirty', (!providers.exec { commandLine 'git', 'status', '--porcelain' }.standardOutput.asText.get().trim().isEmpty()).toString())
+        props.setProperty('built_at', java.time.Instant.now().toString())
+        def destination = generatedBuildInfo.get().file('build-info.properties').asFile
+        destination.parentFile.mkdirs()
+        destination.withOutputStream { props.store(it, 'GhidrAssistMCP build provenance') }
+    }
+}
+sourceSets.main.resources.srcDir(generatedBuildInfo)
+tasks.named('processResources') { dependsOn tasks.named('generateBuildInfo') }
+
 // Exclude additional files from the built extension
 // Ex: buildExtension.exclude '.idea/**'
 

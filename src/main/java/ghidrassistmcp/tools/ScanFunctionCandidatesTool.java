@@ -124,5 +124,5 @@ public class ScanFunctionCandidatesTool implements McpTool {
         map.computeIfAbsent(address.toString(), k -> { Map<String, Object> r = new LinkedHashMap<>(); r.put("address", k); r.put("reasons", new ArrayList<String>()); return r; });
         @SuppressWarnings("unchecked") List<String> reasons = (List<String>) map.get(address.toString()).get("reasons"); if (!reasons.contains(reason)) reasons.add(reason);
     }
-    private static boolean cancelled(McpTask task) { return Thread.currentThread().isInterrupted() || task != null && task.getStatus() == McpTask.Status.CANCELLED; }
+    private static boolean cancelled(McpTask task) { return Thread.currentThread().isInterrupted() || task != null && (task.getStatus() == McpTask.Status.CANCELLED || task.getStatus() == McpTask.Status.CANCEL_REQUESTED); }
 }

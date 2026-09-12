@@ -9,6 +9,7 @@ import java.util.Collections;
 import java.util.List;
 
 import ghidra.program.model.listing.Program;
+import ghidra.framework.model.Project;
 import ghidra.util.Msg;
 
 /**
@@ -17,11 +18,12 @@ import ghidra.util.Msg;
  */
 public class GhidrAssistMCPHeadlessServer {
 
-    private static GhidrAssistMCPHeadlessServer instance;
+    private static volatile GhidrAssistMCPHeadlessServer instance;
     private static final Object lock = new Object();
 
     private GhidrAssistMCPServer server;
     private HeadlessBackend headlessBackend;
+    private HeadlessProjectBackend projectBackend;
     private volatile boolean running = false;
 
     private GhidrAssistMCPHeadlessServer() {
@@ -76,18 +78,45 @@ public class GhidrAssistMCPHeadlessServer {
         }
 
         server = new GhidrAssistMCPServer(host, port, headlessBackend);
-        server.start();
-        running = true;
+        try { server.start(); running = true; }
+        catch (Exception e) { rollbackStartup(); throw e; }
 
         Msg.info(this, "Headless MCP server started successfully with " +
                 headlessBackend.getAvailableTools().size() + " tools");
+    }
+
+    /** Start against the caller-owned project, without CodeBrowser services. */
+    public synchronized void start(Program program, Project project, String host, int port, String toolProfile) throws Exception {
+        if (running) {
+            if (projectBackend == null || !java.util.Objects.equals(projectBackend.getProject().getProjectLocator(), project.getProjectLocator()))
+                throw new IllegalStateException("Running MCP server is bound to a different project/runtime");
+            if (program != null) projectBackend.adoptProgram(program);
+            return;
+        }
+        if (project == null) throw new IllegalArgumentException("project is required for headless project access");
+        if (!"default".equals(toolProfile) && !"agent_lab".equals(toolProfile)) throw new IllegalArgumentException("Unknown headless MCP tool profile: " + toolProfile);
+        projectBackend = new HeadlessProjectBackend(project);
+        try {
+            if (program != null) projectBackend.adoptProgram(program);
+            if ("agent_lab".equals(toolProfile)) projectBackend.enableAgentLabTools();
+            server = new GhidrAssistMCPServer(host, port, projectBackend);
+            server.start(); running = true;
+        }
+        catch (Exception e) { rollbackStartup(); throw e; }
+    }
+
+    private void rollbackStartup() {
+        try { if (server != null) server.stop(); } catch (Exception e) { Msg.warn(this, "Startup rollback: " + e.getMessage()); }
+        if (headlessBackend != null) headlessBackend.shutdown();
+        if (projectBackend != null) projectBackend.shutdownHeadlessPrograms();
+        server = null; headlessBackend = null; projectBackend = null; running = false;
     }
 
     /**
      * Stop the MCP server.
      */
     public synchronized void stop() {
-        if (!running) {
+        if (!running && server == null && headlessBackend == null && projectBackend == null) {
             return;
         }
         try {
@@ -101,9 +130,11 @@ public class GhidrAssistMCPHeadlessServer {
             if (headlessBackend != null) {
                 headlessBackend.shutdown();
             }
+            if (projectBackend != null) projectBackend.shutdownHeadlessPrograms();
         }
         server = null;
         headlessBackend = null;
+        projectBackend = null;
         running = false;
 
         synchronized (lock) {
@@ -122,6 +153,9 @@ public class GhidrAssistMCPHeadlessServer {
         if (headlessBackend != null) {
             headlessBackend.setProgram(program);
         }
+        if (projectBackend != null && program != null) try {
+            projectBackend.adoptProgram(program);
+        } catch (Exception e) { Msg.warn(this, "Unable to bind headless project program: " + e.getMessage()); }
     }
 
     /**
@@ -135,20 +169,24 @@ public class GhidrAssistMCPHeadlessServer {
 
         HeadlessBackend(Program program) {
             super();
+            for (String tool : List.of("get_current_address", "get_current_function", "save_project_session",
+                    "open_program", "close_program", "project_files", "project_repository")) setToolEnabled(tool, false);
             setProgram(program);
         }
 
+        @Override public boolean isHeadlessSession() { return true; }
+        @Override public Project getProject() { return null; }
+
         synchronized void setProgram(Program program) {
             Program oldProgram = this.currentProgram;
+            if (oldProgram == program) return;
+            if (program != null && !program.isClosed()) program.addConsumer(programConsumer);
             if (oldProgram != null) {
                 onProgramDeactivated(oldProgram);
                 releaseProgram(oldProgram);
             }
             this.currentProgram = program;
             if (program != null) {
-                if (!program.isClosed()) {
-                    program.addConsumer(programConsumer);
-                }
                 onProgramActivated(program);
             }
         }
@@ -172,13 +210,13 @@ public class GhidrAssistMCPHeadlessServer {
         }
 
         synchronized void shutdown() {
+            getTaskManager().shutdown();
             Program program = currentProgram;
             currentProgram = null;
             if (program != null) {
                 onProgramDeactivated(program);
                 releaseProgram(program);
             }
-            getTaskManager().shutdown();
         }
 
         void enableAgentLabTools() {

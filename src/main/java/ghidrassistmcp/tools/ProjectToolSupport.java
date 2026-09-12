@@ -17,6 +17,18 @@ final class ProjectToolSupport {
         return tool == null ? null : tool.getProject();
     }
 
+    /** Validate the project captured at submission time before a mutation runs. */
+    static void verifyProject(Map<String, Object> args, Project project) {
+        if (project == null) throw new IllegalArgumentException("The submission project is no longer open");
+        if (!args.containsKey("__project_identity")) return; // synchronous legacy callers have no snapshot
+        Object expected = args.get("__project_identity");
+        if (!(expected instanceof String value) || value.isBlank()) {
+            throw new IllegalArgumentException("Missing submission project identity");
+        }
+        String actual = String.valueOf(project.getProjectLocator());
+        if (!value.equals(actual)) throw new IllegalArgumentException("The active project changed while the operation was queued");
+    }
+
     static String required(Map<String, Object> args, String key) {
         if (args.get(key) instanceof String value && !value.isBlank()) return value.trim();
         throw new IllegalArgumentException(key + " is required");
@@ -56,8 +68,11 @@ final class ProjectToolSupport {
     }
 
     static McpSchema.CallToolResult result(Map<String, Object> data) {
+        return result(data, false);
+    }
+    static McpSchema.CallToolResult result(Map<String, Object> data, boolean isError) {
         try {
-            return McpSchema.CallToolResult.builder().structuredContent(data)
+            return McpSchema.CallToolResult.builder().isError(isError).structuredContent(data)
                 .addTextContent(JSON.writeValueAsString(data)).build();
         } catch (Exception e) { return error(e.getMessage()); }
     }

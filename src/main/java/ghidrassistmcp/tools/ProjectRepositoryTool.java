@@ -34,28 +34,40 @@ public class ProjectRepositoryTool implements McpTool {
     @Override public boolean isOpenWorld() { return true; }
     @Override public McpSchema.JsonSchema getInputSchema() {
         return new McpSchema.JsonSchema("object", Map.of(
-            "action", Map.of("type", "string", "enum", List.of("status", "history", "checkouts", "checkout", "add", "checkin", "undo_checkout")),
+            "action", Map.of("type", "string", "enum", List.of("status", "history", "checkouts", "checkout", "add", "checkin", "undo_checkout", "merge")),
             "path", Map.of("type", "string", "description", "Exact Ghidra project file path"),
+            "paths", Map.of("type", "array", "items", Map.of("type", "string"), "description", "Bounded exact paths for batch status"),
+            "folder", Map.of("type", "string", "description", "Folder to scan for bounded batch status"),
             "exclusive", Map.of("type", "boolean", "default", false),
             "comment", Map.of("type", "string", "description", "Required for add/checkin"),
             "keep_checked_out", Map.of("type", "boolean", "default", true),
             "confirm", Map.of("type", "boolean", "description", "Required true for undo_checkout")),
-            List.of("action", "path"), null, null, null);
+            List.of("action"), null, null, null);
     }
     @Override public McpSchema.CallToolResult execute(Map<String, Object> args, Program program) {
-        return perform(args, TaskMonitor.DUMMY);
+        return perform(args, TaskMonitor.DUMMY, null);
     }
     @Override public McpSchema.CallToolResult execute(Map<String, Object> args, Program program,
             GhidrAssistMCPBackend backend, McpTask task) {
-        McpSchema.CallToolResult result = perform(args, new McpTaskMonitor(task, 0, 100, "Repository"));
+        McpSchema.CallToolResult result = perform(args, new McpTaskMonitor(task, 0, 100, "Repository"), backend);
         if (backend != null && !Boolean.TRUE.equals(result.isError())) backend.clearCache();
         return result;
     }
-    private McpSchema.CallToolResult perform(Map<String, Object> args, TaskMonitor monitor) {
+    @Override public McpSchema.CallToolResult execute(Map<String, Object> args, Program program, GhidrAssistMCPBackend backend) {
+        McpSchema.CallToolResult result = perform(args, TaskMonitor.DUMMY, backend);
+        if (backend != null && !Boolean.TRUE.equals(result.isError())) backend.clearCache();
+        return result;
+    }
+    private McpSchema.CallToolResult perform(Map<String, Object> args, TaskMonitor monitor, GhidrAssistMCPBackend backend) {
         try {
             String action = ProjectToolSupport.required(args, "action").toLowerCase(Locale.ROOT);
-            Project project = projects.get();
+            Project project = backend != null && backend.isHeadlessSession() ? backend.getProject() : projects.get();
             if (project == null) return ProjectToolSupport.error("No active Ghidra project");
+            ProjectToolSupport.verifyProject(args, project);
+            if (action.equals("status") && (args.containsKey("paths") || args.containsKey("folder"))) {
+                return batchStatus(project, args, monitor);
+            }
+            if (!args.containsKey("path")) return ProjectToolSupport.error("path is required for action=" + action);
             DomainFile file = ProjectToolSupport.file(project.getProjectData().getRootFolder(), ProjectToolSupport.required(args, "path"));
             if (file == null) return ProjectToolSupport.error("Project file not found");
             if (action.equals("status")) return ProjectToolSupport.result(status(file));
@@ -116,6 +128,11 @@ public class ProjectRepositoryTool implements McpTool {
                     if (!file.isCheckedOut()) return ProjectToolSupport.error("File is not checked out");
                     file.undoCheckout(true);
                 }
+                case "merge" -> {
+                    if (!file.canMerge()) return ProjectToolSupport.error("No repository merge is pending for this file");
+                    return ProjectToolSupport.result(Map.of("action", "merge", "path", file.getPathname(),
+                        "status", "awaiting_user_resolution", "message", "Use Ghidra's native merge UI to resolve and apply repository changes, then retry status/checkin."));
+                }
                 default -> { return ProjectToolSupport.error("Unknown repository action: " + action); }
             }
             return ProjectToolSupport.result(Map.of("action", action, "completed", true, "status", status(file)));
@@ -134,5 +151,35 @@ public class ProjectRepositoryTool implements McpTool {
         result.put("can_checkout", file.canCheckout()); result.put("can_checkin", file.canCheckin());
         result.put("can_add", file.canAddToRepository()); result.put("can_merge", file.canMerge());
         return result;
+    }
+
+    private McpSchema.CallToolResult batchStatus(Project project, Map<String, Object> args, TaskMonitor monitor) throws Exception {
+        List<DomainFile> files = new ArrayList<>();
+        Object raw = args.get("paths");
+        if (args.containsKey("paths") && !(raw instanceof List<?>)) return ProjectToolSupport.error("paths must be an array of strings");
+        if (raw instanceof List<?> paths) {
+            if (paths.size() > 100) return ProjectToolSupport.error("Batch status is limited to 100 paths");
+            for (Object value : paths) {
+                if (!(value instanceof String path)) return ProjectToolSupport.error("Each paths entry must be a string");
+                DomainFile file = ProjectToolSupport.file(project.getProjectData().getRootFolder(), path);
+                if (file == null) return ProjectToolSupport.error("Project file not found: " + path);
+                files.add(file);
+            }
+        } else {
+            var folder = ProjectToolSupport.folder(project.getProjectData().getRootFolder(), String.valueOf(args.getOrDefault("folder", "/")));
+            if (folder == null) return ProjectToolSupport.error("Project folder not found");
+            var pending = new java.util.ArrayDeque<ghidra.framework.model.DomainFolder>(); pending.add(folder);
+            int visited = 0;
+            while (!pending.isEmpty()) {
+                monitor.checkCancelled();
+                var current = pending.removeFirst();
+                if (++visited > 10000 || current.isLinked()) return ProjectToolSupport.error("Folder status exceeds 10000 entries or contains a linked folder");
+                for (DomainFile file : current.getFiles()) { if (files.size() >= 100) return ProjectToolSupport.error("Batch status is limited to 100 files"); files.add(file); }
+                for (var child : current.getFolders()) { if (++visited > 10000) return ProjectToolSupport.error("Folder status exceeds 10000 entries"); pending.add(child); }
+            }
+        }
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (DomainFile file : files) { monitor.checkCancelled(); rows.add(status(file)); }
+        return ProjectToolSupport.result(Map.of("count", rows.size(), "statuses", rows));
     }
 }

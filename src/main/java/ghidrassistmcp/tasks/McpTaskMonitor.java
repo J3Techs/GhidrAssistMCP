@@ -34,6 +34,7 @@ public class McpTaskMonitor extends TaskMonitorAdapter {
     @Override
     public boolean isCancelled() {
         return cancelled || task.getStatus() == McpTask.Status.CANCELLED ||
+            task.getStatus() == McpTask.Status.CANCEL_REQUESTED ||
             Thread.currentThread().isInterrupted();
     }
 

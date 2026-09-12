@@ -12,6 +12,11 @@ import ghidrassistmcp.GhidrAssistMCPBackend;
 /** Lazily initialized durable BSim runner. A single worker serializes local H2 clients. */
 public final class BsimRuntime implements AutoCloseable {
     private static BsimRuntime instance;
+    public static void closeIfInitialized() {
+        BsimRuntime runtime;
+        synchronized (BsimRuntime.class) { runtime = instance; }
+        if (runtime != null) runtime.close();
+    }
     public static synchronized BsimRuntime instance() throws Exception {
         if (instance == null) instance = new BsimRuntime(Application.getUserSettingsDirectory().toPath().resolve("ghidrassistmcp-bsim"));
         return instance;
@@ -38,6 +43,13 @@ public final class BsimRuntime implements AutoCloseable {
         result.addAll(BsimQueryOperations.operations()); result.addAll(BsimMatchOperations.operations());
         return List.copyOf(result);
     }
+    private Map<String,Object> executeHandler(BsimOperation operation,BsimContext context,
+            Map<String,Object> arguments,ghidra.util.task.TaskMonitor monitor)throws Exception{
+        boolean write=!operation.readOnly();
+        if(write)ghidrassistmcp.McpMutationGuard.LOCK.lockInterruptibly();
+        try{monitor.checkCancelled();return operation.handler().execute(context,arguments,monitor);}
+        finally{if(write)ghidrassistmcp.McpMutationGuard.LOCK.unlock();}
+    }
     public Map<String, Object> execute(BsimOperation operation, Map<String, Object> arguments,
             Program program, GhidrAssistMCPBackend backend) throws Exception {
         BsimJobs.rejectSecrets(arguments);
@@ -60,7 +72,7 @@ public final class BsimRuntime implements AutoCloseable {
         // All client work shares the same worker, including synchronous operations.
         return worker.submit(() -> {
             try (BsimContext context = new BsimContext(program, backend, connections, artifacts, null)) {
-                return BsimJobs.page(operation.handler().execute(context, args, new TaskMonitorAdapter(true)),
+                return BsimJobs.page(executeHandler(operation, context, args, new TaskMonitorAdapter(true)),
                     0, BsimSupport.integer(args, "result_limit", 100, 1000));
             }
         }).get();
@@ -77,7 +89,7 @@ public final class BsimRuntime implements AutoCloseable {
                 if (operation == null) throw new IllegalArgumentException("Operation is no longer available");
                 try (BsimContext context = new BsimContext(program, backend, connections, artifacts, job)) {
                     if (job.arguments().containsKey("programs")) context.validateProgramFiles(job.arguments(), monitor);
-                    var result = operation.handler().execute(context, job.arguments(), monitor);
+                    var result = executeHandler(operation, context, job.arguments(), monitor);
                     monitor.checkCancelled(); job.finish(result);
                 }
             } catch (Exception e) {
@@ -111,6 +123,13 @@ public final class BsimRuntime implements AutoCloseable {
         closed = true;
         for (String id : scheduled) try { jobs.cancel(id); } catch (Exception e) { ghidra.util.Msg.error(this, "Cannot cancel BSim job", e); }
         worker.shutdownNow();
+        try {
+            if (!worker.awaitTermination(20, TimeUnit.SECONDS))
+                throw new IllegalStateException("BSim worker has not stopped; retain its project and program consumers");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while waiting for BSim worker shutdown", e);
+        }
         for (String id : scheduled) try { jobs.get(id).transition("INTERRUPTED", "BSim runner closed; explicitly resume"); } catch (Exception e) { ghidra.util.Msg.error(this, "Cannot persist interrupted BSim job", e); }
         synchronized (BsimRuntime.class) { if (instance == this) instance = null; }
     }

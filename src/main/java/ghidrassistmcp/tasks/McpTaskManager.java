@@ -12,6 +12,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -31,6 +32,7 @@ public class McpTaskManager {
 
     private final Map<String, McpTask> tasks = new ConcurrentHashMap<>();
     private final Map<String, Future<?>> taskFutures = new ConcurrentHashMap<>();
+    private final Map<String, Runnable> taskCleanup = new ConcurrentHashMap<>();
     private final ExecutorService executor;
 
     /**
@@ -80,33 +82,55 @@ public class McpTaskManager {
     public McpTask submitTask(String toolName, Map<String, Object> arguments,
                                McpProgramContext programContext,
                                Function<McpTask, McpSchema.CallToolResult> taskExecutor) {
+        return submitTask(toolName, arguments, programContext, taskExecutor, () -> {});
+    }
+
+    public McpTask submitTask(String toolName, Map<String, Object> arguments,
+                               McpProgramContext programContext,
+                               Function<McpTask, McpSchema.CallToolResult> taskExecutor, Runnable cleanup) {
         // Clean up old tasks before creating new ones
         cleanupOldTasks();
 
         McpTask task = new McpTask(toolName, arguments, programContext);
         tasks.put(task.getTaskId(), task);
+        taskCleanup.put(task.getTaskId(), cleanup);
 
-        Future<?> future = executor.submit(() -> {
+        Future<?> future;
+        try { future = executor.submit(() -> {
             try {
-                task.markStarted();
+                if (!task.beginExecution()) { task.markCancelled(); return; }
                 Msg.info(this, "Task started: " + task.getTaskId() + " for tool: " + toolName);
 
                 McpSchema.CallToolResult result = taskExecutor.apply(task);
-                task.markCompleted(result);
+                if (Boolean.TRUE.equals(result != null && result.isError())) {
+                    task.markFailed("Operation returned an MCP error", result);
+                } else {
+                    task.markCompleted(result);
+                }
 
                 Msg.info(this, "Task completed: " + task.getTaskId() + " in " + task.getDurationMillis() + "ms");
 
+            } catch (CancellationException e) {
+                task.markCancelled();
+                Msg.info(this, "Task cancelled before execution: " + task.getTaskId());
             } catch (Exception e) {
-                task.markFailed(e.getMessage());
-                Msg.error(this, "Task failed: " + task.getTaskId() + " - " + e.getMessage(), e);
-            }
-        });
+                if (task.getStatus() == McpTask.Status.CANCEL_REQUESTED || Thread.currentThread().isInterrupted()) {
+                    task.markCancelled();
+                    Msg.info(this, "Task cancelled after worker stopped: " + task.getTaskId());
+                } else {
+                    task.markFailed(e.getMessage());
+                    Msg.error(this, "Task failed: " + task.getTaskId() + " - " + e.getMessage(), e);
+                }
+            } finally { releaseTask(task.getTaskId()); }
+        }); } catch (RuntimeException e) { tasks.remove(task.getTaskId()); releaseTask(task.getTaskId()); throw e; }
 
         taskFutures.put(task.getTaskId(), future);
         Msg.info(this, "Task submitted: " + task.getTaskId() + " for tool: " + toolName);
 
         return task;
     }
+
+    private void releaseTask(String id) { Runnable cleanup = taskCleanup.remove(id); if (cleanup != null) cleanup.run(); }
 
     /**
      * Get a task by ID
@@ -133,6 +157,7 @@ public class McpTaskManager {
         McpTask task = tasks.get(taskId);
         if (task == null) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("Task not found: " + taskId)
                 .build();
         }
@@ -148,13 +173,16 @@ public class McpTaskManager {
         }
 
         if (task.getStatus() == McpTask.Status.FAILED) {
+            if (task.getResult() != null) return task.getResult();
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("Task failed: " + task.getErrorMessage())
                 .build();
         }
 
         if (task.getStatus() == McpTask.Status.CANCELLED) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("Task was cancelled")
                 .build();
         }
@@ -178,12 +206,14 @@ public class McpTaskManager {
         }
 
         Future<?> future = taskFutures.get(taskId);
+        boolean requested = task.requestCancellation();
+        if (!requested) return false;
         if (future != null) {
-            future.cancel(true);
+            boolean stoppedBeforeStart = future.cancel(true);
+            // A queued Future never invokes the worker to settle the task.
+            if (stoppedBeforeStart && task.getStartedAt() == null) { task.markCancelled(); releaseTask(taskId); }
         }
-
-        task.markCancelled();
-        Msg.info(this, "Task cancelled: " + taskId);
+        Msg.info(this, "Cancellation requested: " + taskId);
         return true;
     }
 
@@ -267,11 +297,15 @@ public class McpTaskManager {
         executor.shutdown();
         try {
             if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
+                for (McpTask task : tasks.values()) if (!task.isTerminal()) cancelTask(task.getTaskId());
                 executor.shutdownNow();
+                if (!executor.awaitTermination(10, TimeUnit.SECONDS))
+                    throw new IllegalStateException("MCP workers have not stopped; program consumers are retained");
             }
         } catch (InterruptedException e) {
             executor.shutdownNow();
             Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while stopping MCP workers; program consumers are retained", e);
         }
         Msg.info(this, "McpTaskManager shut down");
     }

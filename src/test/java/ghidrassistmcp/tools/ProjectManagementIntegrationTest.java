@@ -91,6 +91,21 @@ class ProjectManagementIntegrationTest {
     }
 
     @Test
+    void batchSaveReportsEachSelectedProgram() throws Exception {
+        var language = program.getLanguage();
+        var second = new ProgramDB("fixture-two", language, language.getDefaultCompilerSpec(), consumer);
+        project.getProjectData().getRootFolder().createFile("fixture-two", second, TaskMonitor.DUMMY);
+        int tx1 = program.startTransaction("batch-one"); program.setExecutablePath("batch-one"); program.endTransaction(tx1, true);
+        int tx2 = second.startTransaction("batch-two"); second.setExecutablePath("batch-two"); second.endTransaction(tx2, true);
+        var result = new SaveProgramTool(() -> project.getProject()).execute(
+            Map.of("paths", java.util.List.of("/fixture", "/fixture-two")), null);
+        assertFalse(Boolean.TRUE.equals(result.isError()), () -> result.content().toString());
+        assertEquals(true, ((Map<?, ?>) result.structuredContent()).get("all_succeeded"));
+        assertFalse(program.isChanged()); assertFalse(second.isChanged());
+        second.release(consumer);
+    }
+
+    @Test
     void registerReadbackIncludesInteriorValuesAndRefusesIncompleteMutation() {
         var context = program.getProgramContext();
         var register = context.getRegister("EAX");

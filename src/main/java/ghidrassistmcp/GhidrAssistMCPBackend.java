@@ -203,6 +203,11 @@ public class GhidrAssistMCPBackend implements McpBackend {
         registerTool(new ghidrassistmcp.tools.ScanFunctionCandidatesTool());
         registerTool(new ghidrassistmcp.tools.GetRegisterContextTool());
         for (McpTool bsimTool : ghidrassistmcp.bsim.BsimTool.tools()) registerTool(bsimTool);
+        for (McpTool nativeTool : ghidrassistmcp.nativeapi.NativeAnalysisTools.tools()) registerTool(nativeTool);
+        for (String name : List.of("vt_sessions", "vt_session", "vt_correlators", "vt_correlate", "vt_matches",
+                "vt_review_matches", "vt_add_matches", "vt_markup", "vt_apply_markup", "vt_unapply_markup"))
+            registerTool(new ghidrassistmcp.vt.VTTool(name));
+        registerTool(new ghidrassistmcp.tools.SaveProjectSessionTool());
         registerTool(new AssembleCodeTool());         // assemble_code: assemble instructions and optionally patch bytes
         registerTool(new PatchBytesTool());           // patch_bytes: write patched bytes into program memory
 
@@ -341,14 +346,14 @@ public class GhidrAssistMCPBackend implements McpBackend {
         // Create the program_name property schema
         Map<String, Object> programNameSchema = new HashMap<>();
         programNameSchema.put("type", "string");
-        programNameSchema.put("description", "Optional: Name or Ghidra project path of the program/binary to operate on. " +
-            "Use list_binaries and prefer the listed Project Path when multiple programs share a name. " +
-            "If not specified, uses the currently active program.");
+        programNameSchema.put("description", "Optional exact open program name, project path or URL. Missing/ambiguous selectors fail. " +
+            "Use program_id for version-specific identity. If neither selector is specified, uses the active program.");
 
         if (originalSchema == null) {
             // Create a schema with just program_name
             Map<String, Object> props = new HashMap<>();
             props.put("program_name", programNameSchema);
+            props.put("program_id", Map.of("type", "string", "description", "Exact program_id returned by list_binaries or runtime diagnostics"));
             return new McpSchema.JsonSchema("object", props, List.of(), null, null, null);
         }
 
@@ -364,6 +369,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
 
         // Add program_name parameter
         newProps.put("program_name", programNameSchema);
+        newProps.put("program_id", Map.of("type", "string", "description", "Exact program_id returned by list_binaries or runtime diagnostics"));
 
         // Return new schema with augmented properties
         return new McpSchema.JsonSchema(
@@ -382,6 +388,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
         if (tool == null) {
             Msg.warn(this, "Tool not found: " + toolName);
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("Tool not found: " + toolName)
                 .build();
         }
@@ -396,6 +403,13 @@ public class GhidrAssistMCPBackend implements McpBackend {
         }
 
         try {
+            // Freeze project selection before a task can wait behind another worker.
+            if (List.of("project_files", "project_repository", "save_program", "save_project_session").contains(toolName)
+                    || toolName.startsWith("vt_")) {
+                var project = getProject();
+                arguments = new HashMap<>(arguments);
+                arguments.put("__project_identity", project == null ? "<none>" : project.getProjectLocator().toString());
+            }
             // Notify listeners of the request
             notifyToolRequest(toolName, arguments);
 
@@ -409,7 +423,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
                     ? tool.getCacheDiscriminator(arguments, targetProgram, this)
                     : "";
             if (tool.isCacheable() && targetProgram != null) {
-                String cacheKey = cache.generateKey(toolName, arguments, targetProgram.getName(),
+                String cacheKey = cache.generateKey(toolName, arguments, ProgramIdentity.id(targetProgram),
                     cacheDiscriminator);
                 McpSchema.CallToolResult cachedResult = cache.get(cacheKey, targetProgram);
                 if (cachedResult != null) {
@@ -425,7 +439,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
             }
 
             // Execute synchronously for normal tools
-            McpSchema.CallToolResult result = tool.execute(arguments, targetProgram, this);
+            McpSchema.CallToolResult result = executeGuarded(tool, arguments, targetProgram, null);
 
             // Add active context information to help LLM understand which binary is in focus
             result = addActiveContextToResult(result,
@@ -433,7 +447,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
 
             // Cache the result if tool is cacheable
             if (tool.isCacheable() && targetProgram != null) {
-                String cacheKey = cache.generateKey(toolName, arguments, targetProgram.getName(),
+                String cacheKey = cache.generateKey(toolName, arguments, ProgramIdentity.id(targetProgram),
                     cacheDiscriminator);
                 cache.put(cacheKey, result, targetProgram);
                 Msg.debug(this, "Cached result for tool: " + toolName);
@@ -446,6 +460,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
         } catch (Exception e) {
             Msg.error(this, "Error executing tool " + toolName, e);
             McpSchema.CallToolResult errorResult = McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("Error executing tool " + toolName + ": " + e.getMessage())
                 .build();
 
@@ -467,7 +482,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
         McpTask task = submitTask(toolName, arguments, targetProgram, taskContext -> {
             try {
                 McpSchema.CallToolResult result =
-                    tool.execute(arguments, targetProgram, backend, taskContext);
+                    executeGuarded(tool, arguments, targetProgram, taskContext);
                 // Store the raw result, but retain context in the response shown to listeners.
                 // get_task_status decorates the stored result once using this task's snapshot.
                 notifyToolResponse(toolName,
@@ -503,8 +518,14 @@ public class GhidrAssistMCPBackend implements McpBackend {
     public McpTask submitTask(String toolName, Map<String, Object> arguments,
                               Program targetProgram,
                               Function<McpTask, McpSchema.CallToolResult> taskExecutor) {
+        Object consumer = new Object();
+        if (targetProgram != null && !targetProgram.addConsumer(consumer))
+            throw new IllegalStateException("Target program closed before task submission");
         return taskManager.submitTask(toolName, arguments,
-            captureProgramContext(targetProgram), taskExecutor);
+            captureProgramContext(targetProgram), taskExecutor, () -> {
+                if (targetProgram != null && !targetProgram.isClosed() && targetProgram.isUsedBy(consumer))
+                    targetProgram.release(consumer);
+            });
     }
 
     /**
@@ -538,6 +559,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
         resourceRegistry.registerResource(new ImportsResource());
         resourceRegistry.registerResource(new ExportsResource());
         resourceRegistry.registerResource(new ghidrassistmcp.resources.SegmentsResource());
+        resourceRegistry.registerResource(new ghidrassistmcp.resources.RuntimeCapabilitiesResource(() -> this));
         Msg.info(this, "Registered " + resourceRegistry.getResourceCount() + " MCP resources");
     }
 
@@ -650,27 +672,19 @@ public class GhidrAssistMCPBackend implements McpBackend {
      * @return The resolved program to operate on
      */
     private Program resolveTargetProgram(Map<String, Object> arguments) {
-        if (manager == null) {
-            // Headless mode: no manager, fall back to getCurrentProgram()
-            return getCurrentProgram();
+        if (!arguments.containsKey("program_name") && !arguments.containsKey("program_id")) return getCurrentProgram();
+        var programs = new java.util.LinkedHashSet<Program>(getAllOpenPrograms());
+        if (getCurrentProgram() != null) programs.add(getCurrentProgram());
+        Program result = null;
+        for (String field : List.of("program_name", "program_id")) {
+            if (!arguments.containsKey(field)) continue;
+            if (!(arguments.get(field) instanceof String selector) || selector.isBlank())
+                throw new IllegalArgumentException(field + " must be a nonblank string");
+            Program selected = ProgramIdentity.resolve(selector, programs);
+            if (result != null && selected != result) throw new IllegalArgumentException("program_name and program_id select different programs");
+            result = selected;
         }
-
-        // Check if a specific program was requested
-        Object programNameObj = arguments.get("program_name");
-        if (programNameObj instanceof String) {
-            String programName = (String) programNameObj;
-            if (!programName.trim().isEmpty()) {
-                Program found = manager.getProgramByName(programName);
-                if (found != null) {
-                    Msg.info(this, "Resolved program by name: " + found.getName());
-                    return found;
-                }
-                Msg.warn(this, "Program not found: " + programName + ", using current program");
-            }
-        }
-
-        // Default to current program
-        return manager.getCurrentProgram();
+        return result;
     }
 
     /**
@@ -950,6 +964,31 @@ public class GhidrAssistMCPBackend implements McpBackend {
         }
         changes.forEach(this::setToolEnabled);
         Msg.info(this, "Updated enabled states for " + newStates.size() + " tools");
+    }
+
+    private McpSchema.CallToolResult executeGuarded(McpTool tool, Map<String,Object> arguments,
+            Program program, McpTask task) throws InterruptedException {
+        // BSim invokes its handlers on a separate worker, which acquires this guard there.
+        boolean write = !tool.isReadOnly() && !tool.getName().startsWith("bsim_");
+        if (write) McpMutationGuard.LOCK.lockInterruptibly();
+        try { return task == null ? tool.execute(arguments, program, this) : tool.execute(arguments, program, this, task); }
+        finally { if (write) McpMutationGuard.LOCK.unlock(); }
+    }
+
+    /** Project context is supplied by the runtime, independent of CodeBrowser. */
+    public ghidra.framework.model.Project getProject() {
+        var activeTool = manager == null ? null : manager.getActiveTool();
+        return activeTool == null ? ghidra.framework.main.AppInfo.getActiveProject() : activeTool.getProject();
+    }
+
+    public boolean isHeadlessSession() { return false; }
+
+    public Program openProjectProgram(DomainFile file, int version, ghidra.util.task.TaskMonitor monitor) throws Exception {
+        throw new UnsupportedOperationException("This runtime uses the GUI ProgramManager");
+    }
+
+    public boolean closeProjectProgram(Program program, boolean discard) throws Exception {
+        throw new UnsupportedOperationException("This runtime uses the GUI ProgramManager");
     }
 
     private void registerAlias(String alias, String target) {

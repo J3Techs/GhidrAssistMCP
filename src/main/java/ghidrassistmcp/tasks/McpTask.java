@@ -22,7 +22,8 @@ public class McpTask {
         RUNNING,    // Task is currently executing
         COMPLETED,  // Task completed successfully
         FAILED,     // Task failed with an error
-        CANCELLED   // Task was cancelled
+        CANCEL_REQUESTED, // Cancellation was requested; worker has not settled
+        CANCELLED   // Worker stopped before producing a normal result
     }
 
     private final String taskId;
@@ -139,12 +140,13 @@ public class McpTask {
      * Mark task as completed with result
      */
     public synchronized void markCompleted(McpSchema.CallToolResult taskResult) {
-        if (this.status == Status.RUNNING || this.status == Status.PENDING) {
-            this.status = Status.COMPLETED;
+        if (this.status == Status.RUNNING || this.status == Status.PENDING || this.status == Status.CANCEL_REQUESTED) {
+            // Publish the terminal state after its result fields.
             this.completedAt = Instant.now();
             this.result = taskResult;
             this.progressPercent = 100;
             this.progressMessage = "Completed";
+            this.status = Status.COMPLETED;
         }
     }
 
@@ -152,11 +154,12 @@ public class McpTask {
      * Mark task as failed with error
      */
     public synchronized void markFailed(String taskErrorMessage) {
-        if (this.status == Status.RUNNING || this.status == Status.PENDING) {
-            this.status = Status.FAILED;
+        if (this.status == Status.RUNNING || this.status == Status.PENDING || this.status == Status.CANCEL_REQUESTED) {
+            // Publish the terminal state after its result fields.
             this.completedAt = Instant.now();
             this.errorMessage = taskErrorMessage;
             this.progressMessage = "Failed: " + taskErrorMessage;
+            this.status = Status.FAILED;
         }
     }
 
@@ -164,11 +167,41 @@ public class McpTask {
      * Mark task as cancelled
      */
     public synchronized void markCancelled() {
-        if (this.status == Status.PENDING || this.status == Status.RUNNING) {
-            this.status = Status.CANCELLED;
+        if (this.status == Status.PENDING || this.status == Status.RUNNING || this.status == Status.CANCEL_REQUESTED) {
+            // Publish the terminal state after its result fields.
             this.completedAt = Instant.now();
             this.progressMessage = "Cancelled";
+            this.status = Status.CANCELLED;
         }
+    }
+
+    /** Admit the worker atomically against cancellation of queued tasks. */
+    public synchronized boolean beginExecution() {
+        if (status != Status.PENDING) return false;
+        markStarted();
+        return true;
+    }
+
+    /** Settle an operation that returned an MCP error while retaining its structured result. */
+    public synchronized void markFailed(String taskErrorMessage, McpSchema.CallToolResult taskResult) {
+        if (this.status == Status.RUNNING || this.status == Status.PENDING || this.status == Status.CANCEL_REQUESTED) {
+            // Publish the terminal state after its result fields.
+            this.completedAt = Instant.now();
+            this.errorMessage = taskErrorMessage;
+            this.result = taskResult;
+            this.progressMessage = "Failed: " + taskErrorMessage;
+            this.status = Status.FAILED;
+        }
+    }
+
+    /** Record a request without claiming that the worker has stopped. */
+    public synchronized boolean requestCancellation() {
+        if (this.status == Status.PENDING || this.status == Status.RUNNING) {
+            this.status = Status.CANCEL_REQUESTED;
+            this.progressMessage = "Cancellation requested; waiting for worker to stop...";
+            return true;
+        }
+        return false;
     }
 
     /**

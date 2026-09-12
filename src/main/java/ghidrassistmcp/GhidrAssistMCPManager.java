@@ -10,7 +10,6 @@ import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import ghidra.app.services.ProgramManager;
-import ghidra.framework.model.DomainFile;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.framework.preferences.Preferences;
 import ghidra.program.model.listing.Program;
@@ -323,38 +322,15 @@ public class GhidrAssistMCPManager {
             return getCurrentProgram();
         }
 
-        List<Program> programs = getAllOpenPrograms();
-
-        // Exact project path match (e.g. "/v1/app.exe" disambiguates from "/v2/app.exe")
-        for (Program p : programs) {
-            DomainFile df = p.getDomainFile();
-            if (df != null && df.getPathname().equals(programName)) {
-                return p;
-            }
+        try {
+            return ProgramIdentity.resolve(programName, getAllOpenPrograms());
         }
-
-        // Exact name match
-        for (Program p : programs) {
-            if (p.getName().equals(programName)) {
-                return p;
-            }
+        catch (IllegalArgumentException e) {
+            // Callers of this legacy helper use null to report a missing target;
+            // the dispatcher uses ProgramIdentity.resolve directly to preserve the
+            // distinction between missing and ambiguous selectors.
+            return null;
         }
-
-        // Case-insensitive match
-        for (Program p : programs) {
-            if (p.getName().equalsIgnoreCase(programName)) {
-                return p;
-            }
-        }
-
-        // Partial match
-        for (Program p : programs) {
-            if (p.getName().toLowerCase().contains(programName.toLowerCase())) {
-                return p;
-            }
-        }
-
-        return null;
     }
 
     /**

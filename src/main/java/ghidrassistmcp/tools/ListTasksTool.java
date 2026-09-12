@@ -34,7 +34,7 @@ public class ListTasksTool implements McpTool {
                 "status", Map.of(
                     "type", "string",
                     "description", "Optional: filter tasks by status",
-                    "enum", List.of("PENDING", "RUNNING", "COMPLETED", "FAILED", "CANCELLED")
+                    "enum", List.of("PENDING", "RUNNING", "CANCEL_REQUESTED", "COMPLETED", "FAILED", "CANCELLED")
                 )
             ),
             List.of(), null, null, null);
@@ -66,7 +66,7 @@ public class ListTasksTool implements McpTool {
             } catch (IllegalArgumentException e) {
                 return McpSchema.CallToolResult.builder()
                     .addTextContent("Invalid status filter: " + statusStr +
-                        ". Valid values: PENDING, RUNNING, COMPLETED, FAILED, CANCELLED")
+                        ". Valid values: PENDING, RUNNING, CANCEL_REQUESTED, COMPLETED, FAILED, CANCELLED")
                     .build();
             }
         }

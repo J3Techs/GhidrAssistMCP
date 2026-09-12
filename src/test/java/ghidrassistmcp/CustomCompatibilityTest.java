@@ -57,7 +57,11 @@ class CustomCompatibilityTest {
         assertTrue(names.containsAll(additions));
         var bsimNames = ghidrassistmcp.bsim.BsimTool.tools().stream().map(McpTool::getName).collect(Collectors.toSet());
         assertTrue(names.containsAll(bsimNames));
-        assertEquals(94 + bsimNames.size(), names.size());
+        assertTrue(names.containsAll(Set.of("vt_sessions", "vt_session", "vt_correlators", "vt_correlate",
+            "vt_matches", "vt_review_matches", "vt_add_matches", "vt_markup", "vt_apply_markup", "vt_unapply_markup",
+            "datatype_archive_catalog", "parse_c_declarations", "datatype_import_selected", "program_diff",
+            "fid_list_databases", "fid_identify_functions", "save_project_session")));
+        assertEquals(94 + bsimNames.size() + 17, names.size());
     }
 
     @Test

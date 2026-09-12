@@ -88,7 +88,7 @@ public class ScanInstructionsTool implements McpTool {
         for (Object item : list) if (!(item instanceof String s) || s.isBlank()) throw new IllegalArgumentException("mnemonics entries must be non-empty strings"); else result.add(s.trim());
         return result;
     }
-    private static boolean cancelled(McpTask task) { return Thread.currentThread().isInterrupted() || task != null && task.getStatus() == McpTask.Status.CANCELLED; }
+    private static boolean cancelled(McpTask task) { return Thread.currentThread().isInterrupted() || task != null && (task.getStatus() == McpTask.Status.CANCELLED || task.getStatus() == McpTask.Status.CANCEL_REQUESTED); }
     private static String bytes(Program p, Address a, int length) throws Exception {
         byte[] b = new byte[length]; p.getMemory().getBytes(a, b); StringBuilder s = new StringBuilder();
         for (byte x : b) s.append(String.format("%02x", x & 0xff)); return s.toString();

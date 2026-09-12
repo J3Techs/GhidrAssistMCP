@@ -66,7 +66,7 @@ public class GetCodeTool implements McpTool {
 
     @Override
     public String getDescription() {
-        return "Get code representation of a function in various formats (decompiler, disassembly, or pcode)";
+        return "Get code representation of a function (decompiler, disassembly, or pcode). structured=true returns bounded native variables, p-code, optional tokens or instruction records.";
     }
 
     @Override
@@ -86,13 +86,26 @@ public class GetCodeTool implements McpTool {
                     "type", "boolean",
                     "description", "Optional: Only affects format 'pcode' (raw pcode ops vs grouped by basic blocks)",
                     "default", false
-                )
+                ),
+                "structured", Map.of("type", "boolean", "default", false),
+                "max_items", Map.of("type", "integer", "minimum", 1, "maximum", 10000, "default", 1000),
+                "timeout_seconds", Map.of("type", "integer", "minimum", 1, "maximum", 300, "default", 30),
+                "include_tokens", Map.of("type", "boolean", "default", false)
             ),
             List.of("function", "format"), null, null, null);
     }
 
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
+        return executeWithMonitor(arguments, currentProgram, TaskMonitor.DUMMY);
+    }
+
+    @Override public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program program,
+            GhidrAssistMCPBackend backend, ghidrassistmcp.tasks.McpTask task) {
+        return executeWithMonitor(arguments, program, new ghidrassistmcp.tasks.McpTaskMonitor(task, 0, 100, "Code"));
+    }
+
+    private McpSchema.CallToolResult executeWithMonitor(Map<String, Object> arguments, Program currentProgram, TaskMonitor monitor) {
         if (currentProgram == null) {
             return McpSchema.CallToolResult.builder()
                 .addTextContent("No program currently loaded")
@@ -131,6 +144,8 @@ public class GetCodeTool implements McpTool {
         }
 
         // Dispatch to appropriate handler based on format
+        if (Boolean.TRUE.equals(arguments.get("structured")))
+            return StructuredCode.read(decompilerService, arguments, currentProgram, function, format, monitor);
         switch (format) {
             case "decompiler":
                 return getDecompiledCode(currentProgram, function);

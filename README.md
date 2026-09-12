@@ -8,11 +8,13 @@ GhidrAssistMCP bridges the gap between AI-powered analysis tools and Ghidra's co
 
 ### Key Features
 
+- **Persistent headless projects**: Keep multiple program databases open across MCP requests without CodeBrowser. See [headless operation](docs/HEADLESS.md).
+- **Native Version Tracking and analysis**: Session/correlator/selected-markup tools, staged C/header imports, ProgramDiff and Function ID. See [VT](docs/VT.md), [native analysis](docs/NATIVE_ANALYSIS.md), and [project workflows](docs/WORKFLOWS.md).
 - **Native BSim workflows**: 32 database, corpus, query, reviewed-match, and persistent-job tools. See [BSim tools](docs/BSIM.md).
 - **MCP Server Integration**: Full Model Context Protocol server implementation using official SDK
 - **Dual HTTP Transports**: Supports SSE and Streamable HTTP transports for maximum client compatibility
 - **Upstream tools plus 12 custom tools and legacy API compatibility**: Comprehensive set of analysis tools with action-based consolidation for cleaner APIs
-- **6 MCP Resources**: Static data resources for program info, functions, strings, imports, exports, and segments
+- **7 MCP Resources**: Program info, functions, strings, imports, exports, segments, and runtime capability diagnostics
 - **7 MCP Prompts**: Pre-built analysis prompts for common reverse engineering tasks
 - **Result Caching**: Intelligent caching system to improve performance for repeated queries
 - **Async Task Support**: Long-running operations execute asynchronously with task management

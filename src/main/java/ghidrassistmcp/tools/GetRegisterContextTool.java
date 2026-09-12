@@ -79,6 +79,6 @@ public class GetRegisterContextTool implements McpTool {
         catch (Exception e) { return ProjectToolSupport.error("Register context read failed: " + e.getMessage()); }
     }
     private static boolean cancelled(McpTask task) {
-        return Thread.currentThread().isInterrupted() || task != null && task.getStatus() == McpTask.Status.CANCELLED;
+        return Thread.currentThread().isInterrupted() || task != null && (task.getStatus() == McpTask.Status.CANCELLED || task.getStatus() == McpTask.Status.CANCEL_REQUESTED);
     }
 }

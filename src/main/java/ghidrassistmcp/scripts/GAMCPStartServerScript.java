@@ -20,8 +20,8 @@ public class GAMCPStartServerScript extends GhidraScript {
 
     @Override
     protected void run() throws Exception {
-        if (currentProgram == null) {
-            Msg.warn(this, "GAMCPStartServerScript: No program loaded, skipping MCP server start");
+        if (state.getProject() == null) {
+            Msg.warn(this, "GAMCPStartServerScript: No project loaded, skipping MCP server start");
             return;
         }
 
@@ -57,17 +57,22 @@ public class GAMCPStartServerScript extends GhidraScript {
 
         if (mcpServer.isRunning()) {
             Msg.info(this, "MCP server already running, updating program reference");
-            mcpServer.setProgram(currentProgram);
+            mcpServer.start(currentProgram, state.getProject(), host, port, toolProfile);
             if (waitForClients) {
+                // Release GhidraScript.start()'s transaction before blocking so
+                // MCP saves, repository locks, and VT work can proceed.
+                end(true);
                 waitUntilCancelled(mcpServer, completionFile);
             }
             return;
         }
 
-        Msg.info(this, "Starting headless MCP server for: " + currentProgram.getName());
-        mcpServer.start(currentProgram, host, port, toolProfile);
+        Msg.info(this, "Starting headless MCP server for project: " + state.getProject().getProjectLocator());
+        mcpServer.start(currentProgram, state.getProject(), host, port, toolProfile);
         Msg.info(this, "Headless MCP server ready on " + host + ":" + port);
         if (waitForClients) {
+                // Do not hold the script transaction while the MCP server waits.
+                end(true);
                 waitUntilCancelled(mcpServer, completionFile);
         }
     }
@@ -77,7 +82,7 @@ public class GAMCPStartServerScript extends GhidraScript {
         try {
             while (!monitor.isCancelled() && mcpServer.isRunning()) {
                 if (completionFile != null && !completionFile.isBlank() && Files.isRegularFile(Path.of(completionFile))) {
-                    Msg.info(this, "Headless MCP completion file observed; saving and closing the session");
+                    Msg.info(this, "Headless MCP completion file observed; stopping. Explicitly save modified programs before signaling completion.");
                     break;
                 }
                 Thread.sleep(1000);
