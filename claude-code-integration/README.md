@@ -17,13 +17,9 @@ Claude Code skill that enforces a disciplined pipeline for porting function anno
 
 **Installation:** Copy to `~/.claude/skills/ghidra-function-port/SKILL.md`
 
-### `hooks/rename-symbol-hooks.json`
+### Legacy hooks
 
-Pre/post tool-use hooks that fire on every `rename_symbol` MCP call to enforce the pipeline:
-- **PreToolUse** — Reminds to confirm the match was found via signature search with a confidence score
-- **PostToolUse** — Checklist of remaining annotation steps after rename
-
-**Installation:** Merge the `hooks` object into your project's `.claude/settings.local.json`
+The former `rename-symbol-hooks.json` hook was retired. Its reminders were not tied to the current exact `program_id`, preview, return-code, and save contracts. The versioned `port-functions` and `deep-function` skills provide scoped guidance without installing project hooks or forcing mutations.
 
 ### `scripts/`
 

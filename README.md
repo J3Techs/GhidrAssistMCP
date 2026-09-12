@@ -1,6 +1,8 @@
 # GhidrAssistMCP
 
-Current repair and installation evidence: [Grok review repairs](docs/GROK_REPAIR_AND_INSTALL_2026-09-11.md), [deployment policy](docs/DEPLOYMENT_TRUST.md).
+Workflow upgrade: [complete implementation plan](docs/MCP_UPGRADE_IMPLEMENTATION_PLAN.md), [release notes](docs/UPGRADE_RELEASE_NOTES.md), [final validation and remaining runtime gates](docs/UPGRADE_FINAL_VALIDATION_2026-09-12.md), [Claude plugin](docs/CLAUDE_INTEGRATION.md), and [Grok integration](docs/GROK_INTEGRATION.md).
+
+Current repair and installation evidence: [Grok review repairs](docs/GROK_REPAIR_AND_INSTALL_2026-09-11.md), [Grok client review](docs/GROK_CLIENT_REVIEW_2026-09-11.md), [Claude vs Grok client compare](docs/CLIENT_INTEGRATION_COMPARE_2026-09-11.md), [deployment policy](docs/DEPLOYMENT_TRUST.md).
 
 A powerful Ghidra extension that provides an MCP (Model Context Protocol) server, enabling AI assistants and other tools to interact with Ghidra's reverse engineering capabilities through a standardized API.
 

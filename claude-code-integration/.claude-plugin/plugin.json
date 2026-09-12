@@ -1,0 +1,8 @@
+{
+  "name": "ghidrassist",
+  "version": "0.3.0",
+  "description": "Claude Code integration for the GhidrAssistMCP server",
+  "author": {"name": "GhidrAssistMCP"},
+  "skills": ["./skills/port-functions", "./skills/deep-function"],
+  "mcpServers": "./.mcp.json"
+}

@@ -36,6 +36,9 @@ public final class RuntimeCapabilitiesResource implements McpResource {
 
     /** Shared tool/resource representation; construction never connects to a remote backend. */
     public Map<String, Object> snapshot() {
+        return snapshot(true);
+    }
+    public Map<String, Object> snapshot(boolean includePrograms) {
         Map<String,Object> out = new LinkedHashMap<>();
         out.put("schema_version", 1);
         out.put("resource", URI);
@@ -59,8 +62,12 @@ public final class RuntimeCapabilitiesResource implements McpResource {
         out.put("active_project", project == null ? null : String.valueOf(project.getProjectLocator()));
         out.put("headless_session", backend != null && backend.isHeadlessSession());
         out.put("program_manager_available", backend != null && backend.hasProgramManager());
-        out.put("open_programs", backend == null ? List.of() : backend.getAllOpenPrograms().stream().map(ProgramIdentity::describe).toList());
-        out.put("active_program", active == null ? null : ProgramIdentity.describe(active));
+        var programs = backend == null ? List.<Program>of() : ghidrassistmcp.tools.ProgramDiscoverySupport.unique(backend.getAllOpenPrograms());
+        out.put("include_programs", includePrograms); out.put("program_count", programs.size());
+        out.put("active_program_id", active == null ? null : ProgramIdentity.id(active));
+        var counts = new java.util.HashMap<String,Integer>(); for (Program p : programs) counts.merge(ProgramIdentity.id(p),1,Integer::sum);
+        out.put("program_id_collisions", counts.entrySet().stream().filter(e->e.getValue()>1).map(e->e.getKey()).sorted().toList());
+        if (includePrograms) { out.put("open_programs", programs.stream().map(ProgramIdentity::describe).toList()); out.put("active_program", active == null ? null : ProgramIdentity.describe(active)); }
         out.put("native_version_tracking", Map.of("available", classPresent("ghidra.feature.vt.api.main.VTSession"), "correlators", correlatorNames()));
         out.put("bsim", Map.of("api_available", classPresent("ghidra.features.bsim.query.BSimServerInfo"), "backend_validation", "not verified by this read-only resource"));
         out.put("tasks", Map.of("generic", Map.of("durable", false, "restart_recovery", "generic task records are lost on JVM restart; inspect saved databases before retrying"), "bsim", Map.of("durable_journal", true, "backend_health", "not probed")));
@@ -79,7 +86,7 @@ public final class RuntimeCapabilitiesResource implements McpResource {
         try (InputStream in = getClass().getClassLoader().getResourceAsStream("build-info.properties")) {
             if (in == null) { info.put("available", false); return info; }
             var props = new java.util.Properties(); props.load(in); info.put("available", true);
-            for (String key : List.of("revision", "dirty", "built_at")) if (props.containsKey(key)) info.put(key, props.getProperty(key));
+            for (String key : List.of("revision", "dirty", "built_at", "source_sha256")) if (props.containsKey(key)) info.put(key, props.getProperty(key));
         } catch (Exception e) { info.put("available", false); info.put("error", "build info unavailable"); }
         return info;
     }

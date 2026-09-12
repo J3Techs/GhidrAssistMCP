@@ -30,12 +30,12 @@ public class ListSegmentsTool implements McpTool {
     public McpSchema.JsonSchema getInputSchema() {
         return new McpSchema.JsonSchema("object", 
             Map.of(
-                "offset", new McpSchema.JsonSchema("integer", null, null, null, null, null),
-                "limit", new McpSchema.JsonSchema("integer", null, null, null, null, null)
+                "offset", QueryPageBounds.offsetSchema(),
+                "limit", QueryPageBounds.limitSchema()
             ),
             List.of(), null, null, null);
     }
-    
+
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
         if (currentProgram == null) {
@@ -45,26 +45,25 @@ public class ListSegmentsTool implements McpTool {
         }
         
         // Parse optional offset and limit
-        int offset = 0;
-        int limit = 100; // Default limit
+        final int offset;
+        final int limit;
+        try {
+            offset = QueryPageBounds.integer(arguments, "offset", 0, 0, Integer.MAX_VALUE);
+            limit = QueryPageBounds.integer(arguments, "limit", 100, 1, QueryPageBounds.MAX_LIMIT);
+        } catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
         
-        if (arguments.get("offset") instanceof Number) {
-            offset = ((Number) arguments.get("offset")).intValue();
-        }
-        if (arguments.get("limit") instanceof Number) {
-            limit = ((Number) arguments.get("limit")).intValue();
-        }
-        
-        StringBuilder result = new StringBuilder();
+        BoundedQueryText result = new BoundedQueryText(BoundedQueryText.PAGE_CHARS - 1024);
         result.append("Memory Segments/Blocks:\n\n");
         
         MemoryBlock[] blocks = currentProgram.getMemory().getBlocks();
         
         int count = 0;
         int totalCount = blocks.length;
+        boolean rendering = true;
         
         for (int i = offset; i < blocks.length && count < limit; i++) {
             MemoryBlock block = blocks[i];
+            if (!rendering) continue;
             
             String permissions = "";
             if (block.isRead()) permissions += "R";
@@ -80,6 +79,7 @@ public class ListSegmentsTool implements McpTool {
                   .append("\n");
             
             count++;
+            if (result.full()) { count--; rendering = false; }
         }
         
         if (totalCount == 0) {
@@ -91,8 +91,10 @@ public class ListSegmentsTool implements McpTool {
             }
         }
         
-        return McpSchema.CallToolResult.builder()
-            .addTextContent(result.toString())
-            .build();
+        boolean hasMore = (long) offset + count < totalCount;
+        String footer = "\nPage: offset=" + offset + ", limit=" + limit + ", has_more=" + hasMore
+            + (hasMore ? ", next_offset=" + ((long) offset + count) : "")
+            + (result.full() ? ", details_truncated=true; request the next page or narrower output" : "");
+        return McpSchema.CallToolResult.builder().addTextContent(result.toString() + footer).build();
     }
 }

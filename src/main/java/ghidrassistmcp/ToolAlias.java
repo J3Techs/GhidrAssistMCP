@@ -25,10 +25,12 @@ final class ToolAlias implements McpTool {
     @Override public Map<String, Object> getInputSchemaMap() { return delegate.getInputSchemaMap(); }
     @Override public Map<String, Object> getOutputSchema() { return delegate.getOutputSchema(); }
     @Override public boolean isReadOnly() { return delegate.isReadOnly(); }
+    @Override public boolean isReadOnly(Map<String, Object> arguments) { return delegate.isReadOnly(arguments); }
     @Override public boolean isDestructive() { return delegate.isDestructive(); }
     @Override public boolean isIdempotent() { return delegate.isIdempotent(); }
     @Override public boolean isOpenWorld() { return delegate.isOpenWorld(); }
     @Override public boolean isLongRunning() { return delegate.isLongRunning(); }
+    @Override public boolean isLongRunning(Map<String, Object> arguments) { return delegate.isLongRunning(arguments); }
     @Override public boolean isCacheable() { return delegate.isCacheable(); }
 
     @Override

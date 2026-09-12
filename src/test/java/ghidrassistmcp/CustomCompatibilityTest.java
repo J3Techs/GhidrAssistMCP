@@ -62,7 +62,8 @@ class CustomCompatibilityTest {
             "datatype_archive_catalog", "parse_c_declarations", "datatype_import_selected", "program_diff",
             "fid_list_databases", "fid_identify_functions", "save_project_session")));
         assertTrue(names.containsAll(Set.of("wait_task", "runtime_capabilities")));
-        assertEquals(94 + bsimNames.size() + 19, names.size());
+        assertTrue(names.contains("port_ledger"));
+        assertEquals(94 + bsimNames.size() + 20, names.size());
     }
 
     @Test

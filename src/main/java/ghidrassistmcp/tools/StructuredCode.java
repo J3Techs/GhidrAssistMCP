@@ -47,6 +47,12 @@ final class StructuredCode {
                     return ProjectToolSupport.error("Decompilation " + (decompiled.isTimedOut() ? "timed out" : "failed") + ": " + decompiled.getErrorMessage());
                 HighFunction high = decompiled.getHighFunction();
                 result.put("decompile_completed", true);
+                String cText = decompiled.getDecompiledFunction() == null ? null : decompiled.getDecompiledFunction().getC();
+                if (cText != null) {
+                    int cMax = positive(args, "max_chars", 200000, 200000);
+                    result.put("c", cText.length() <= cMax ? cText : cText.substring(0, cMax));
+                    result.put("c_truncated", cText.length() > cMax);
+                }
                 result.put("diagnostic", Objects.toString(decompiled.getErrorMessage(), ""));
                 result.put("basic_block_count", high.getBasicBlocks().size());
                 List<Object> symbols = new ArrayList<>();

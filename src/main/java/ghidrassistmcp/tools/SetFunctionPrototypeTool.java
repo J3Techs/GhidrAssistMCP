@@ -20,12 +20,17 @@ import ghidra.util.Msg;
 import ghidra.util.task.ConsoleTaskMonitor;
 import ghidrassistmcp.GhidrAssistMCPBackend;
 import ghidrassistmcp.McpTool;
+import ghidrassistmcp.decompiler.DecompilerService;
 import io.modelcontextprotocol.spec.McpSchema;
 
 /**
  * MCP tool that sets a function's prototype/signature.
  */
 public class SetFunctionPrototypeTool implements McpTool {
+    private final DecompilerService decompilerService;
+
+    public SetFunctionPrototypeTool() { this(null); }
+    public SetFunctionPrototypeTool(DecompilerService decompilerService) { this.decompilerService = decompilerService; }
 
     @Override
     public boolean isReadOnly() {
@@ -44,7 +49,7 @@ public class SetFunctionPrototypeTool implements McpTool {
     
     @Override
     public String getDescription() {
-        return "Set a function's prototype/signature";
+        return "Set a function signature using native name-preservation rules; a default-origin name may change. Inspect stored_prototype and function_entry; return_code=true includes bounded decompilation after commit.";
     }
     
     @Override
@@ -52,7 +57,10 @@ public class SetFunctionPrototypeTool implements McpTool {
         return new McpSchema.JsonSchema("object", 
             Map.of(
                 "function_address", new McpSchema.JsonSchema("string", null, null, null, null, null),
-                "prototype", new McpSchema.JsonSchema("string", null, null, null, null, null)
+                "prototype", new McpSchema.JsonSchema("string", null, null, null, null, null),
+                "return_code", new McpSchema.JsonSchema("boolean", null, null, null, null, null),
+                "max_chars", new McpSchema.JsonSchema("integer", null, null, null, null, null),
+                "verification_timeout_seconds", new McpSchema.JsonSchema("integer", null, null, null, null, null)
             ),
             List.of("function_address", "prototype"), null, null, null);
     }
@@ -66,6 +74,8 @@ public class SetFunctionPrototypeTool implements McpTool {
                 .addTextContent("No program currently loaded")
                 .build();
         }
+        String optionError = PostMutationCode.validateOptions(arguments);
+        if (optionError != null) return ProjectToolSupport.error(optionError);
 
         String functionAddrStr = (String) arguments.get("function_address");
         String prototype = (String) arguments.get("prototype");
@@ -87,12 +97,12 @@ public class SetFunctionPrototypeTool implements McpTool {
         // Use proper prototype setting with transaction handling
         PrototypeResult result = setFunctionPrototype(currentProgram, functionAddrStr, prototype);
 
-        return McpSchema.CallToolResult.builder()
-            .isError(!result.success)
-            .addTextContent(result.success ?
-                "Successfully set function prototype: " + prototype :
-                "Failed to set function prototype: " + result.errorMessage)
-            .build();
+        if (!result.success || !Boolean.TRUE.equals(arguments.get("return_code")))
+            return McpSchema.CallToolResult.builder().isError(!result.success).addTextContent(result.success ?
+                "Successfully set function prototype: " + result.storedPrototype :
+                "Failed to set function prototype: " + result.errorMessage).build();
+        return PostMutationCode.result(currentProgram, result.function, result.storedPrototype,
+            decompilerService, arguments);
     }
 
     @Override
@@ -107,10 +117,15 @@ public class SetFunctionPrototypeTool implements McpTool {
     private static class PrototypeResult {
         final boolean success;
         final String errorMessage;
+        final Function function;
+        final String storedPrototype;
         
-        PrototypeResult(boolean success, String errorMessage) {
+        PrototypeResult(boolean success, String errorMessage) { this(success, errorMessage, null, null); }
+        PrototypeResult(boolean success, String errorMessage, Function function, String storedPrototype) {
             this.success = success;
             this.errorMessage = errorMessage;
+            this.function = function;
+            this.storedPrototype = storedPrototype;
         }
     }
     
@@ -129,6 +144,10 @@ public class SetFunctionPrototypeTool implements McpTool {
 
         final StringBuilder errorMessage = new StringBuilder();
         final AtomicBoolean success = new AtomicBoolean(false);
+        Function function;
+        try { function = FunctionLookup.resolve(program, functionAddrStr); }
+        catch (Exception e) { return new PrototypeResult(false, e.getMessage()); }
+        if (function == null) return new PrototypeResult(false, "Function not found: " + functionAddrStr);
 
         try {
             // This is a database command, not a UI operation. Keep execution on the
@@ -140,7 +159,8 @@ public class SetFunctionPrototypeTool implements McpTool {
             Msg.error(this, msg, e);
         }
 
-        return new PrototypeResult(success.get(), errorMessage.toString());
+        String stored = function == null ? null : function.getPrototypeString(false, false);
+        return new PrototypeResult(success.get(), errorMessage.toString(), function, stored);
     }
 
     /**
@@ -150,17 +170,10 @@ public class SetFunctionPrototypeTool implements McpTool {
                                        AtomicBoolean success, StringBuilder errorMessage) {
         try {
             // Get the address and function
-            Address addr = program.getAddressFactory().getAddress(functionAddrStr);
-            if (addr == null) {
-                String msg = "Invalid address format: " + functionAddrStr;
-                errorMessage.append(msg);
-                Msg.error(this, msg);
-                return;
-            }
-            
-            Function func = program.getFunctionManager().getFunctionAt(addr);
+            Function func = FunctionLookup.resolve(program, functionAddrStr);
+            Address addr = func == null ? null : func.getEntryPoint();
             if (func == null) {
-                String msg = "Could not find function at address: " + functionAddrStr;
+                String msg = "Could not find function: " + functionAddrStr;
                 errorMessage.append(msg);
                 Msg.error(this, msg);
                 return;
@@ -235,7 +248,9 @@ public class SetFunctionPrototypeTool implements McpTool {
         // Called only inside the signature transaction; failures must roll it back.
         String currentComment = function.getComment();
         String newComment = "Applied prototype: " + prototype;
-        if (currentComment != null && !currentComment.isEmpty()) newComment = currentComment + "\n" + newComment;
+        if (currentComment != null && currentComment.lines().noneMatch(newComment::equals)) {
+            newComment = currentComment + "\n" + newComment;
+        } else if (currentComment != null && !currentComment.isEmpty()) return;
         function.setComment(newComment);
     }
     

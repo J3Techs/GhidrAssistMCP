@@ -72,8 +72,17 @@ public class GetTaskStatusTool implements McpTool {
         }
 
         // Return the retained operation payload for both successful and error outcomes.
-        if (task.isTerminal() && task.getResult() != null) {
-            return task.getResult();
+        McpSchema.CallToolResult retained = task.getResult();
+        if (task.isTerminal() && retained != null) {
+            return retained;
+        }
+
+        if (task.isTerminal() && task.getResultRetentionCode() != null) {
+            return ProjectToolSupport.result(Map.of(
+                "error", Map.of("code", task.getResultRetentionCode(),
+                    "message", "The terminal task payload is no longer retained; operation status is authoritative."),
+                "task_id", task.getTaskId(), "operation_status", task.getStatus().name(),
+                "result_available", false, "retained_result_bytes", task.getRetainedResultBytes()), true);
         }
 
         // Otherwise return status summary

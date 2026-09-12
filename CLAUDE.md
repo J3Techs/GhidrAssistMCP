@@ -1,98 +1,38 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for working on the GhidrAssistMCP Ghidra extension. Treat the current source and tests as authoritative. Historical review notes are useful context, but are superseded when they disagree with implemented behavior.
 
-## Build and Development Commands
+## Architecture
 
-### Building the Extension
-```bash
-# Set GHIDRA_INSTALL_DIR environment variable first
-export GHIDRA_INSTALL_DIR=/path/to/ghidra
+- `GhidrAssistMCPPlugin` integrates with Ghidra and owns plugin/UI lifecycle.
+- `GhidrAssistMCPServer` exposes the MCP Streamable HTTP endpoint under `/mcp`.
+- `GhidrAssistMCPBackend` owns tool registration, admission, execution traits, task management, program selection, caching, and lifecycle draining.
+- `McpTool` defines tool schemas, static catalog annotations, invocation traits, and execution methods. Mixed action tools may classify reads from their arguments; catalog annotations remain conservative.
+- `src/main/java/ghidrassistmcp/tools/` contains consolidated and compatibility tools. Do not infer a fixed tool count.
 
-# Build the extension
-gradle distributeExtension
+Program selection uses exact identity. Prefer the `program_id` returned by discovery/capabilities when selecting a version-specific program; names and project paths can be ambiguous. A request retains a program lease for its full execution. Shutdown stops admission, drains active requests and workers, and releases leases only after the work settles. Task IDs are process-local and are not durable database identity.
 
-# Or specify Ghidra path directly
-gradle -PGHIDRA_INSTALL_DIR=/path/to/ghidra distributeExtension
+## MCP and runtime distinctions
+
+The server is reached at `/mcp`; use the MCP client transport and current server configuration rather than assuming legacy SSE/message paths. Source changes, a generated extension archive, an installed extension, and the extension loaded by an already-running Ghidra JVM are separate states. A successful Gradle build creates an archive; it does not update an installed or loaded runtime. Restart Ghidra after installing a rebuilt extension.
+
+Regression fixtures use disposable in-memory or temporary ProgramDB instances and must not depend on live user databases. Live Ghidra state and persisted project state require explicit inspection and save operations when a task calls for them.
+
+## Build and tests
+
+Use the Gradle wrapper and pass the Ghidra installation explicitly. The locally verified Windows toolchain is:
+
+```powershell
+$env:JAVA_HOME = 'C:\Users\JResp\.codex\tmp\ghidrassist-modernization\jdk-25.0.4.1+1'
+.\gradlew.bat -PGHIDRA_INSTALL_DIR='C:\Users\JResp\Desktop\ghidra_12.0.3_PUBLIC' test buildExtension --console=plain
 ```
 
-### Project Structure
-This is a Ghidra extension project with the following key components:
+On another machine, override `JAVA_HOME` and `GHIDRA_INSTALL_DIR` (or pass `-PGHIDRA_INSTALL_DIR`) with paths appropriate to that platform. Use `./gradlew` on Unix-like systems and `./gradlew.bat` on Windows. Do not assume a global Gradle installation.
 
-- **Main Plugin**: `GhidrAssistMCPPlugin.java` - Core plugin with UI provider and actions
-- **Analyzer**: `GhidrAssistMCPAnalyzer.java` - Custom analyzer for binary analysis
-- **Loader**: `GhidrAssistMCPLoader.java` - Custom loader for specific file formats
-- **Exporter**: `GhidrAssistMCPExporter.java` - Custom exporter functionality
-- **File System**: `GhidrAssistMCPFileSystem.java` - Custom file system implementation
+Run focused tests while iterating, then the full `test` task before delivery. Tests cover protocol contracts, tool behavior, lifecycle and shutdown, task ownership, caching, and disposable ProgramDB/decompiler fixtures. Keep tests deterministic and bounded; do not connect them to a live Ghidra project.
 
-### Key Directories
-- `src/main/java/ghidrassistmcp/` - Main Java source code
-- `src/test/java/` - Test files
-- `data/` - Language specifications (SLEIGH files)
-- `ghidra_scripts/` - Ghidra scripts
-- `lib/` - External dependencies
-- `dist/` - Built extension output
+## Workflow and safety
 
-### Development Notes
-- Extension uses Ghidra's plugin architecture with standard lifecycle methods
-- All components extend appropriate Ghidra base classes (AbstractAnalyzer, AbstractProgramWrapperLoader, etc.)
-- Built extension will be placed in `dist/` directory
-- Language specifications in `data/languages/` define custom processor architectures
-- Help documentation is in `src/main/help/`
+Inspect existing tests and local instructions before editing. Preserve unrelated working-tree changes. Keep mutations inside Ghidra transactions and report failures honestly. For post mutation verification, distinguish a committed mutation from verification that is unavailable or stale; never claim rollback or automatic retry unless the implementation actually performed it. Save program/project/session state explicitly when persistence is part of the request.
 
-### Dependencies
-- Requires Ghidra installation with matching Gradle version
-- Uses Ghidra's buildExtension.gradle for build configuration
-- MCP SDK (io.modelcontextprotocol.sdk:mcp:0.9.0) for Model Context Protocol support
-- Jetty 11.0.20 for embedded HTTP server
-- Jackson 2.17.0 for JSON processing
-
-### MCP Server
-The extension includes an embedded MCP (Model Context Protocol) server that:
-- Runs on port 8080 by default
-- Provides SSE endpoint at `/mcp/sse` and HTTP request endpoint at `/mcp/message`
-- Automatically tracks the currently loaded program
-- Exposes Ghidra analysis capabilities via MCP tools:
-  - `get_program_info`: Get basic program information
-  - `list_functions`: List all functions in the program
-  - `get_function_info`: Get detailed function information
-
-### Build Requirements
-- Java 25 or higher
-- Gradle version matching your Ghidra installation
-- Internet connection for dependency downloads from Maven Central
-
-### Build Command Notes
-- Always use the build command: `GHIDRA_INSTALL_DIR=/home/jtang613/tools/ghidra_11.4_PUBLIC/ /opt/gradle/bin/gradle buildExtension`
-
-### Testing
-- No formal test suite currently exists
-- Manual testing through Ghidra UI and MCP client connections
-- Test tools individually through the Configuration tab
-
-### Core Architecture
-The extension follows a plugin-based architecture:
-- **Plugin Layer**: `GhidrAssistMCPPlugin` manages lifecycle, Ghidra integration, and multi-program tracking via ProgramManager service
-- **Server Layer**: `GhidrAssistMCPServer` handles HTTP/SSE MCP protocol
-- **Backend Layer**: `GhidrAssistMCPBackend` manages tool registry, execution, and program resolution
-- **UI Layer**: `GhidrAssistMCPProvider` provides configuration and logging interface
-- **Tool Layer**: 39 individual tools implementing the `McpTool` interface
-
-### Multi-Program Support
-- All tools support an optional `program_name` parameter to target specific programs
-- Use `list_programs` tool to see all open programs
-- Program resolution supports exact, case-insensitive, and partial name matching
-
-### MCP Tools System
-Tools are dynamically registered and can be enabled/disabled:
-- All tools extend `McpTool` interface with `getName()`, `getDescription()`, `getInputSchema()`, and `execute()`
-- Tools are organized into categories: Analysis, Modification, Navigation, and Advanced
-- Backend maintains tool registry with enable/disable states
-- UI provides real-time tool management and activity logging
-
-### Development Workflow
-1. Build with `gradle buildExtension`
-2. Install generated ZIP from `dist/` directory in Ghidra
-3. Enable plugin in Ghidra's Configure Plugins dialog
-4. Access UI via Window → GhidrAssistMCP
-5. Configure server settings and test tools through UI
+The implementation plan in `docs/MCP_UPGRADE_IMPLEMENTATION_PLAN.md` tracks upgrade work. Shared operating behavior belongs in `src/main/resources/ghidrassistmcp/operating-guide.md`; update both only when the requested change affects shared client guidance.

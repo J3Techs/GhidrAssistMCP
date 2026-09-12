@@ -31,7 +31,8 @@ class AppliedProtocolConformanceTest {
             assertFalse(initialized.capabilities().resources().listChanged());
             assertFalse(initialized.capabilities().prompts().listChanged());
             assertNull(initialized.capabilities().completions());
-            assertTrue(initialized.instructions().contains("Application task IDs"));
+            assertEquals(OperatingGuide.text(), initialized.instructions());
+            assertTrue(initialized.instructions().contains("in-memory manager"));
             var first = wire.client.listTools().tools();
             assertEquals(first, wire.client.listTools().tools());
             assertEquals(first.stream().map(McpSchema.Tool::name).sorted(String.CASE_INSENSITIVE_ORDER).toList(),

@@ -112,7 +112,7 @@ public class FunctionInventoryTool implements McpTool {
             result.put("next_offset", !records.isEmpty() && matched > (long) offset + records.size()
                 ? (long) offset + records.size() : null);
             result.put("functions", records);
-            return ProjectToolSupport.result(result);
+            return BatchQuerySupport.boundedResult(result);
         } catch (Exception e) {
             return ProjectToolSupport.error(e.getMessage());
         }

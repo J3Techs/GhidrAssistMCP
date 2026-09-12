@@ -16,7 +16,7 @@ public final class RuntimeCapabilitiesTool implements McpTool {
             + "headless/GUI services and task recovery limits. Read-only; does not probe remote backends.";
     }
     @Override public McpSchema.JsonSchema getInputSchema() {
-        return new McpSchema.JsonSchema("object", Map.of(), List.of(), false, null, null);
+        return new McpSchema.JsonSchema("object", Map.of("include_programs", new McpSchema.JsonSchema("boolean", null, null, null, null, null)), List.of(), false, null, null);
     }
     @Override public Map<String, Object> getOutputSchema() {
         var text = Map.of("type", "string");
@@ -39,7 +39,11 @@ public final class RuntimeCapabilitiesTool implements McpTool {
         properties.put("active_project", nullableText);
         properties.put("open_programs", Map.of("type", "array", "items", program));
         properties.put("active_program", Map.of("anyOf", List.of(program, Map.of("type", "null"))));
-        properties.put("build_info", object(Map.of("available", bool, "revision", text, "dirty", text, "built_at", text, "error", text), List.of("available")));
+        properties.put("include_programs", bool);
+        properties.put("program_count", Map.of("type", "integer", "minimum", 0));
+        properties.put("active_program_id", nullableText);
+        properties.put("program_id_collisions", strings);
+        properties.put("build_info", object(Map.of("available", bool, "revision", text, "dirty", text, "built_at", text, "source_sha256", text, "error", text), List.of("available")));
         var protocol = Map.<String, Object>of("sdk_version", text, "latest_supported_revision", text,
             "supported_revisions", strings, "stateless_2026_07_28", bool, "tasks_extension", bool, "application_task_api", strings);
         properties.put("protocol", object(protocol, List.copyOf(protocol.keySet())));
@@ -48,7 +52,9 @@ public final class RuntimeCapabilitiesTool implements McpTool {
         properties.put("tasks", object(Map.of(
             "generic", object(Map.of("durable", bool, "restart_recovery", text), List.of("durable", "restart_recovery")),
             "bsim", object(Map.of("durable_journal", bool, "backend_health", text), List.of("durable_journal", "backend_health"))), List.of("generic", "bsim")));
-        return object(properties, List.copyOf(properties.keySet()));
+        var required = new java.util.ArrayList<>(properties.keySet());
+        required.removeAll(List.of("open_programs", "active_program", "include_programs", "program_count", "active_program_id", "program_id_collisions"));
+        return object(properties, required);
     }
     private static Map<String, Object> object(Map<String, ?> properties, List<String> required) {
         return Map.of("type", "object", "properties", properties, "required", required, "additionalProperties", false);
@@ -57,6 +63,10 @@ public final class RuntimeCapabilitiesTool implements McpTool {
         return execute(args, program, null);
     }
     @Override public McpSchema.CallToolResult execute(Map<String, Object> args, Program program, GhidrAssistMCPBackend backend) {
-        return ProjectToolSupport.result(new RuntimeCapabilitiesResource(() -> backend).snapshot());
+        try {
+            Object v=args == null ? null : args.get("include_programs");
+            if (v != null && !(v instanceof Boolean)) throw new IllegalArgumentException("include_programs must be boolean");
+            return ProjectToolSupport.result(new RuntimeCapabilitiesResource(() -> backend).snapshot(v == null || Boolean.TRUE.equals(v)));
+        } catch (Exception e) { return ProjectToolSupport.result(Map.of("schema_version",1,"error",String.valueOf(e.getMessage())),true); }
     }
 }

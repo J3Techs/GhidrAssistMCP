@@ -40,6 +40,8 @@ public class McpTask {
     private volatile Instant startedAt;
     private volatile Instant completedAt;
     private volatile McpSchema.CallToolResult result;
+    private volatile String resultRetentionCode;
+    private volatile long retainedResultBytes;
     private volatile String errorMessage;
     private volatile int progressPercent;
     private volatile String progressMessage;
@@ -112,6 +114,8 @@ public class McpTask {
         if (completedAt != null) value.put("completed_at", completedAt.toString());
         value.put("duration_ms", getDurationMillis());
         value.put("result_available", isTerminal() && result != null);
+        if (resultRetentionCode != null) value.put("result_retention_code", resultRetentionCode);
+        value.put("retained_result_bytes", retainedResultBytes);
         if (errorMessage != null) value.put("error_message", clipped(errorMessage));
         Map<String, Object> program = new LinkedHashMap<>();
         if (programContext.programName() != null) program.put("name", clipped(programContext.programName()));
@@ -181,6 +185,22 @@ public class McpTask {
         return result;
     }
 
+    public String getResultRetentionCode() { return resultRetentionCode; }
+    public long getRetainedResultBytes() { return retainedResultBytes; }
+
+    /** Drop only the retained payload; terminal operation status and error remain authoritative. */
+    public synchronized void discardResult(String code) {
+        if (result != null) result = null;
+        retainedResultBytes = 0;
+        resultRetentionCode = code;
+        changed();
+    }
+
+    public synchronized void setRetainedResultBytes(long bytes) {
+        retainedResultBytes = Math.max(0, bytes);
+        resultRetentionCode = null;
+    }
+
     public String getErrorMessage() {
         return errorMessage;
     }
@@ -226,7 +246,7 @@ public class McpTask {
         if (this.status == Status.RUNNING || this.status == Status.PENDING || this.status == Status.CANCEL_REQUESTED) {
             // Publish the terminal state after its result fields.
             this.completedAt = Instant.now();
-            this.result = taskResult;
+            this.result = resultRetentionCode == null ? taskResult : null;
             this.progressPercent = 100;
             this.progressMessage = "Completed";
             this.status = Status.COMPLETED;
@@ -274,7 +294,7 @@ public class McpTask {
             // Publish the terminal state after its result fields.
             this.completedAt = Instant.now();
             this.errorMessage = taskErrorMessage;
-            this.result = taskResult;
+            this.result = resultRetentionCode == null ? taskResult : null;
             this.progressMessage = "Failed: " + taskErrorMessage;
             this.status = Status.FAILED;
             changed();

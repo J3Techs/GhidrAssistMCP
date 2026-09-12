@@ -113,7 +113,7 @@ public class QueryAddressContextBatchTool implements McpTool {
         return Boolean.TRUE.equals(row.get("truncated")) || Boolean.TRUE.equals(row.get("symbols_truncated"))
             || row.get("bytes") instanceof Map<?, ?> bytes && Boolean.TRUE.equals(bytes.get("truncated"));
       }));
-      return ProjectToolSupport.result(out, errors == rows.size());
+      return BatchQuerySupport.boundedResult(out, errors == rows.size());
     } catch (Exception e) {
       return ProjectToolSupport.error(e.getMessage());
     }

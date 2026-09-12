@@ -38,6 +38,7 @@ import ghidrassistmcp.tools.AnalysisOptionsTool;
 import ghidrassistmcp.tools.AnalyzeProgramTool;
 import ghidrassistmcp.tools.AssembleCodeTool;
 import ghidrassistmcp.tools.BookmarksTool;
+import ghidrassistmcp.tools.PortLedgerTool;
 import ghidrassistmcp.tools.CancelTaskTool;
 import ghidrassistmcp.tools.ClassTool;
 import ghidrassistmcp.tools.CloseProgramTool;
@@ -110,6 +111,8 @@ import io.modelcontextprotocol.spec.McpSchema;
  * Works with the singleton GhidrAssistMCPManager to support multiple CodeBrowser windows.
  */
 public class GhidrAssistMCPBackend implements McpBackend {
+    private final RequestMetrics requestMetrics = new RequestMetrics();
+    public List<RequestMetrics.Record> getRequestMetrics() { return requestMetrics.snapshot(); }
     private volatile boolean stopping;
     private final Object admissionLock = new Object();
     private final Map<Thread, Integer> activeInvocations = new java.util.IdentityHashMap<>();
@@ -177,6 +180,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
     private final List<McpEventListener> eventListeners = new CopyOnWriteArrayList<>();
     private volatile GhidrAssistMCPManager manager;
     private volatile boolean asyncExecutionEnabled = true;
+    private volatile long asyncReadGraceMillis = 500L;
     private final McpTaskManager taskManager;
     private final McpResourceRegistry resourceRegistry;
     private final McpPromptRegistry promptRegistry;
@@ -236,6 +240,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
         registerTool(new RenameSymbolBatchTool(decompilerService)); // batch_rename
         registerTool(new SearchBytesTool());
         registerTool(new BookmarksTool());           // bookmarks (actions: list/set/remove)
+        registerTool(new PortLedgerTool());          // PORT transfer provenance ledger
         registerTool(new ClassTool());               // classes
 
         // Register new tools (Phase 4 — feature parity)
@@ -312,7 +317,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
         registerTool(new GetDataTypeTool());
         registerTool(new DeleteDataTypeTool());
         registerTool(new ListDataTypesTool());
-        registerTool(new SetFunctionPrototypeTool());
+        registerTool(new SetFunctionPrototypeTool(decompilerService));
         registerTool(new SetLocalVariableTypeTool(decompilerService));
         registerTool(new SetDataTypeTool());
         registerTool(new SetCommentTool());
@@ -450,7 +455,15 @@ public class GhidrAssistMCPBackend implements McpBackend {
                 .addTextContent("Backend is stopping; wait for shutdown to finish").build();
             if (!control) activeInvocations.merge(Thread.currentThread(), 1, Integer::sum);
         }
-        try { return callToolInternal(toolName, arguments); }
+        RequestMetrics.Sample metrics = requestMetrics.start(toolName != null && tools.containsKey(toolName) ? toolName : "unknown");
+        try {
+            McpSchema.CallToolResult response = callToolInternal(toolName, arguments, metrics);
+            metrics.finish(response);
+            return response;
+        } catch (RuntimeException e) {
+            metrics.finish(null);
+            throw e;
+        }
         finally {
             if (!control) synchronized (admissionLock) {
                 activeInvocations.computeIfPresent(Thread.currentThread(), (thread, count) -> count == 1 ? null : count - 1);
@@ -459,7 +472,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
         }
     }
 
-    private McpSchema.CallToolResult callToolInternal(String toolName, Map<String, Object> arguments) {
+    private McpSchema.CallToolResult callToolInternal(String toolName, Map<String, Object> arguments, RequestMetrics.Sample metrics) {
         if (arguments == null) arguments = Map.of();
         McpTool tool = toolName == null ? null : tools.get(toolName);
         if (tool == null) {
@@ -495,7 +508,9 @@ public class GhidrAssistMCPBackend implements McpBackend {
             Msg.info(this, "Executing tool: " + toolName);
 
             // Resolve the target program - check if program_name is specified
+            metrics.begin("selection");
             Program targetProgram = resolveTargetProgram(arguments);
+            metrics.end("selection");
             if (targetProgram != null) {
                 if (!targetProgram.addConsumer(requestConsumer))
                     throw new IllegalStateException("Target program closed before request execution");
@@ -516,12 +531,12 @@ public class GhidrAssistMCPBackend implements McpBackend {
             }
 
             // Check if this is a long-running tool that should be executed asynchronously
-            if (tool.isLongRunning() && asyncExecutionEnabled) {
-                return executeToolAsync(tool, toolName, arguments, targetProgram, cacheSnapshot);
+            if (tool.isLongRunning(arguments) && asyncExecutionEnabled) {
+                return executeToolAsync(tool, toolName, arguments, targetProgram, cacheSnapshot, metrics);
             }
 
             // Execute synchronously for normal tools
-            McpSchema.CallToolResult result = McpOutputSchemas.validateCompletion(tool, executeGuarded(tool, arguments, targetProgram, null));
+            McpSchema.CallToolResult result = McpOutputSchemas.validateCompletion(tool, executeGuarded(tool, arguments, targetProgram, null, metrics));
 
             cacheSuccessfulResult(tool, toolName, arguments, targetProgram, cacheSnapshot, result, null);
 
@@ -555,23 +570,43 @@ public class GhidrAssistMCPBackend implements McpBackend {
      */
     private McpSchema.CallToolResult executeToolAsync(McpTool tool, String toolName,
                                                        Map<String, Object> arguments, Program targetProgram,
-                                                       CacheSnapshot cacheSnapshot) {
+                                                       CacheSnapshot cacheSnapshot, RequestMetrics.Sample submissionMetrics) {
         Map<String, Object> submittedArguments = McpTask.freezeArguments(arguments);
-        McpTask task = submitTask(toolName, submittedArguments, targetProgram, taskContext -> {
+        RequestMetrics.Sample workerMetrics = submissionMetrics.forkWorker().begin("queue");
+        McpTask task;
+        try { task = submitTask(toolName, submittedArguments, targetProgram, taskContext -> {
+            workerMetrics.end("queue");
             try {
                 McpSchema.CallToolResult result =
-                    McpOutputSchemas.validateCompletion(tool, executeGuarded(tool, submittedArguments, targetProgram, taskContext));
+                    McpOutputSchemas.validateCompletion(tool, executeGuarded(tool, submittedArguments, targetProgram, taskContext, workerMetrics));
                 cacheSuccessfulResult(tool, toolName, submittedArguments, targetProgram, cacheSnapshot, result, taskContext);
                 // Store the raw result, but retain context in the response shown to listeners.
                 // get_task_status decorates the stored result once using this task's snapshot.
                 notifyToolResponse(toolName,
                     addActiveContextToResult(result, taskContext.getProgramContext()));
+                workerMetrics.finish(addActiveContextToResult(result, taskContext.getProgramContext()));
                 return result;
             } catch (Exception e) {
+                workerMetrics.end("execution").finish(null);
                 Msg.error(this, "Async tool execution failed: " + toolName, e);
                 throw new RuntimeException(e);
             }
-        });
+        }); } catch (java.util.concurrent.RejectedExecutionException e) {
+            return McpSchema.CallToolResult.builder().isError(true)
+                .structuredContent(Map.of("schema_version", 1, "error", "SERVER_BUSY", "retryable", true))
+                .addTextContent("SERVER_BUSY: async task queue is full; retry later").build();
+        }
+
+        if (tool.isReadOnly(arguments) && asyncReadGraceMillis > 0) {
+            try {
+                taskManager.waitForTask(task.getTaskId(), asyncReadGraceMillis, null);
+                McpSchema.CallToolResult retained = task.getResult();
+                if (task.isTerminal() && retained != null)
+                    return addActiveContextToResult(retained, task.getProgramContext());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
 
         // Return task information immediately
         return McpSchema.CallToolResult.builder()
@@ -579,11 +614,18 @@ public class GhidrAssistMCPBackend implements McpBackend {
                 "Task ID: " + task.getTaskId() + "\n" +
                 "Tool: " + toolName + "\n" +
                 "Status: " + task.getStatus() + "\n\n" +
-                "Use wait_task with this task_id to wait for completion, then get_task_status to retrieve results.\n" +
+                "Use wait_task with this task_id and include_result=true for bounded completion results, or get_task_status to retrieve retained results.\n" +
                 "Use cancel_task to cancel if needed.")
             .structuredContent(taskManager.waitForTaskSnapshot(task))
             .build();
     }
+
+    public void setAsyncReadGraceMillis(long millis) {
+        if (millis < 0 || millis > 1000) throw new IllegalArgumentException("async read grace must be between 0 and 1000 ms");
+        asyncReadGraceMillis = millis;
+    }
+
+    public long getAsyncReadGraceMillis() { return asyncReadGraceMillis; }
 
     private record CacheSnapshot(String key, String programName, long modificationNumber) {}
 
@@ -1084,13 +1126,15 @@ public class GhidrAssistMCPBackend implements McpBackend {
     }
 
     private McpSchema.CallToolResult executeGuarded(McpTool tool, Map<String,Object> arguments,
-            Program program, McpTask task) throws InterruptedException {
+            Program program, McpTask task, RequestMetrics.Sample metrics) throws InterruptedException {
         // BSim invokes its handlers on a separate worker, which acquires this guard there.
-        boolean write = !tool.isReadOnly() && !tool.getName().startsWith("bsim_")
+        boolean write = !tool.isReadOnly(arguments) && !tool.getName().startsWith("bsim_")
             && !(tool instanceof CancelTaskTool);
+        metrics.begin("writer_guard");
         if (write) McpMutationGuard.LOCK.lockInterruptibly();
+        metrics.end("writer_guard").begin("execution");
         try { return task == null ? tool.execute(arguments, program, this) : tool.execute(arguments, program, this, task); }
-        finally { if (write) McpMutationGuard.LOCK.unlock(); }
+        finally { metrics.end("execution"); if (write) McpMutationGuard.LOCK.unlock(); }
     }
 
     /** Report attached GUI services without creating a global manager in headless mode. */

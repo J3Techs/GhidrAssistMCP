@@ -37,11 +37,11 @@ public class ListImportsTool implements McpTool {
     public McpSchema.JsonSchema getInputSchema() {
         return new McpSchema.JsonSchema("object", 
             Map.of(
-                "offset", new McpSchema.JsonSchema("integer", null, null, null, null, null),
-                "limit", new McpSchema.JsonSchema("integer", null, null, null, null, null),
+                "offset", QueryPageBounds.offsetSchema(),
+                "limit", QueryPageBounds.limitSchema(),
                 "structured", Map.of("type", "boolean", "default", false),
                 "library", Map.of("type", "string", "description", "Exact external library filter for structured output"),
-                "reference_limit", Map.of("type", "integer", "default", 100, "maximum", 1000)
+                "reference_limit", Map.of("type", "integer", "minimum", 1, "default", 100, "maximum", 1000)
             ),
             List.of(), null, null, null);
     }
@@ -56,23 +56,21 @@ public class ListImportsTool implements McpTool {
         }
         
         // Parse optional offset and limit
-        int offset = 0;
-        int limit = 100; // Default limit
+        final int offset;
+        final int limit;
+        try {
+            offset = QueryPageBounds.integer(arguments, "offset", 0, 0, Integer.MAX_VALUE);
+            limit = QueryPageBounds.integer(arguments, "limit", 100, 1, QueryPageBounds.MAX_LIMIT);
+        } catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
         
-        if (arguments.get("offset") instanceof Number) {
-            offset = ((Number) arguments.get("offset")).intValue();
-        }
-        if (arguments.get("limit") instanceof Number) {
-            limit = ((Number) arguments.get("limit")).intValue();
-        }
-        
-        StringBuilder result = new StringBuilder();
+        BoundedQueryText result = new BoundedQueryText(BoundedQueryText.PAGE_CHARS - 1024);
         result.append("Imported Functions and Symbols:\n\n");
         
         SymbolIterator symbolIter = currentProgram.getSymbolTable().getSymbolIterator();
         
         int count = 0;
         int totalCount = 0;
+        boolean rendering = true;
         
         while (symbolIter.hasNext()) {
             Symbol symbol = symbolIter.next();
@@ -90,7 +88,7 @@ public class ListImportsTool implements McpTool {
                 }
                 
                 // Apply limit to displayed results only; keep scanning for a true total.
-                if (count < limit) {
+                if (count < limit && rendering) {
                     String libraryName = "unknown";
                     if (symbol.getParentNamespace() != null) {
                         libraryName = symbol.getParentNamespace().getName();
@@ -103,6 +101,7 @@ public class ListImportsTool implements McpTool {
                           .append("\n");
 
                     count++;
+                    if (result.full()) { count--; rendering = false; }
                 }
             }
         }
@@ -116,17 +115,19 @@ public class ListImportsTool implements McpTool {
             }
         }
         
-        return McpSchema.CallToolResult.builder()
-            .addTextContent(result.toString())
-            .build();
+        boolean hasMore = (long) offset + count < totalCount;
+        String footer = "\nPage: offset=" + offset + ", limit=" + limit + ", has_more=" + hasMore
+            + (hasMore ? ", next_offset=" + ((long) offset + count) : "")
+            + (result.full() ? ", details_truncated=true; request the next page or narrower output" : "");
+        return McpSchema.CallToolResult.builder().addTextContent(result.toString() + footer).build();
     }
 
     private McpSchema.CallToolResult structured(Map<String, Object> args, Program program) {
         try {
             if (program == null) return ProjectToolSupport.error("No program currently loaded");
-            int offset = BatchQuerySupport.integer(args, "offset", 0, 100000);
-            int limit = BatchQuerySupport.integer(args, "limit", 100, 1000);
-            int referenceLimit = BatchQuerySupport.integer(args, "reference_limit", 100, 1000);
+            int offset = QueryPageBounds.integer(args, "offset", 0, 0, Integer.MAX_VALUE);
+            int limit = QueryPageBounds.integer(args, "limit", 100, 1, QueryPageBounds.MAX_LIMIT);
+            int referenceLimit = QueryPageBounds.integer(args, "reference_limit", 100, 1, 1000);
             if ((long) limit * referenceLimit > 100000) throw new IllegalArgumentException("Reduce limit/reference_limit; total reference budget is 100000");
             String library = args.containsKey("library") ? BatchQuerySupport.text(args.get("library"), "library") : null;
             var rows = new java.util.ArrayList<Map<String, Object>>();
@@ -157,9 +158,12 @@ public class ListImportsTool implements McpTool {
                 rows.add(row);
             }
             boolean more = matched > offset + rows.size() || iterator.hasNext();
-            return ProjectToolSupport.result(Map.of("program", ghidrassistmcp.ProgramIdentity.describe(program),
-                "imports", rows, "count", rows.size(), "offset", offset, "next_offset", offset + rows.size(),
-                "truncated", more, "scanned", scanned));
+            var page = new java.util.LinkedHashMap<String, Object>();
+            page.put("program", ghidrassistmcp.ProgramIdentity.describe(program)); page.put("imports", rows);
+            page.put("count", rows.size()); page.put("offset", offset);
+            page.put("next_offset", more ? (long) offset + rows.size() : null);
+            page.put("has_more", more); page.put("truncated", more); page.put("scanned", scanned);
+            return ProjectToolSupport.result(page);
         } catch (Exception e) { return ProjectToolSupport.error(e.getMessage()); }
     }
 }

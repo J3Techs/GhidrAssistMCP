@@ -12,3 +12,5 @@ lucene/
 ghidrassist_analysis.db
 ghidrassist_rlhf.db
 .gitlab-ci.yml
+__pycache__/
+*.pyc

@@ -1,0 +1,8 @@
+# Inactive fragment: merge only after verifying support in your Grok client.
+[mcp]
+max_output_bytes = 131072
+
+[mcp_servers.ghidrassist]
+url = "http://127.0.0.1:8080/mcp"
+enabled = true
+# Grok 1.0.30 documents both this registration and mcp.max_output_bytes.

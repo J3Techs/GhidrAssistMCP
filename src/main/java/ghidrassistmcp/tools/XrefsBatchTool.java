@@ -101,7 +101,7 @@ public class XrefsBatchTool implements McpTool {
         rows.add(row);
       }
       boolean truncated = rows.stream().anyMatch(row -> Boolean.TRUE.equals(((Map<?, ?>) row).get("truncated")));
-      return ProjectToolSupport.result(
+      return BatchQuerySupport.boundedResult(
           Map.of("results", rows, "count", rows.size(), "errors", errors, "scanned", scanned[0], "scan_limit", scanLimit, "truncated",
               truncated, "partial", errors > 0 || truncated), errors == rows.size());
     } catch (Exception e) {

@@ -29,7 +29,7 @@ public final class VTTool implements McpTool {
         case "vt_session"->"Create, get, save or close a native VT session. Saves destination and session separately with per-object outcomes.";
         case "vt_correlators"->"List installed native VT correlators and their typed options, plus native markup policy options.";
         case "vt_correlate"->"Run a native correlator using validated options and optional inclusive address ranges. Cancellable; changes stay unsaved.";
-        case "vt_matches"->"Page native VT matches, association status and native scores (scores are not probabilities).";
+        case "vt_matches"->"Page native VT matches with names, match-set identity, association status and native similarity/confidence (not custom matcher scores or acceptance probabilities). Optional match_set_id/status/min_score filters and a session_revision cursor; a sorted page scans all matches without retaining the native list.";
         case "vt_add_matches"->"Add a manually reviewed function or defined-data association; validates both native objects and their lengths.";
         case "vt_review_matches"->"Accept, reject or clear a native match association. Does not save or apply markup.";
         case "vt_markup"->"Preview mapped native markup, stable item IDs, apply policies and a freshness token. Page results before choosing IDs.";
@@ -44,6 +44,16 @@ public final class VTTool implements McpTool {
         case "vt_sessions"->p.put("action",Map.of("type","string","enum",List.of("list","get")));
         case "vt_session"->{p.put("action",Map.of("type","string","enum",List.of("create","get","save","close")));req.add("action");p.put("name",prop("string"));p.put("destination_program",prop("string"));p.put("discard",prop("boolean"));}
         case "vt_correlate"->{p.put("correlator",prop("string"));req.add("correlator");p.put("options",prop("object"));for(String side:List.of("source","destination"))for(String bound:List.of("start","end"))p.put(side+"_range_"+bound,prop("string"));}
+        case "vt_matches"->{
+            p.put("match_set_id",Map.of("type","integer","minimum",0,"description","Native match-set id; omit to include every set. Duplicate correlator associations stay visible as separate rows."));
+            p.put("status",Map.of("type","string","enum",List.of("accepted","rejected","available","blocked","ACCEPTED","REJECTED","AVAILABLE","BLOCKED"),"description","Filter by association status. Short forms match vt_review_matches; native enum names are also accepted. BLOCKED is native-only."));
+            p.put("min_score",Map.of("type","number","description","Minimum native VT similarity from VTMatch.getSimilarityScore (typically 0-1). Does not use confidence or custom matcher scores. A high score is not automatic acceptance."));
+            p.put("session_revision",Map.of("type","integer","minimum",0,"description","If supplied, must equal the current VTSession/DomainObject modification number. A mismatch is an explicit paging invalidation; restart from offset 0."));
+            p.put("source_program_id",prop("string"));
+            p.put("source_revision",Map.of("type","integer","minimum",0,"description","Source program modification number from the previous page. Independent of session_revision."));
+            p.put("destination_program_id",prop("string"));
+            p.put("destination_revision",Map.of("type","integer","minimum",0,"description","Destination program modification number from the previous page. Name edits invalidate paging even if the session revision is unchanged."));
+        }
         case "vt_review_matches","vt_add_matches","vt_markup","vt_apply_markup","vt_unapply_markup"->{
             for(String key:List.of("source_address","destination_address")){p.put(key,prop("string"));req.add(key);}p.put("match_set_id",prop("integer"));
             if(name.equals("vt_review_matches")){p.put("status",Map.of("type","string","enum",List.of("accepted","rejected","available")));req.add("status");}
@@ -54,6 +64,49 @@ public final class VTTool implements McpTool {
         }
         if(name.equals("vt_matches")||name.equals("vt_markup")){p.put("offset",Map.of("type","integer","minimum",0));p.put("limit",Map.of("type","integer","minimum",1,"maximum",VTSupport.MAX_LIMIT));}
         return new McpSchema.JsonSchema("object",p,req,null,null,null);
+    }
+    @Override public Map<String,Object> getOutputSchema(){
+        if(!name.equals("vt_matches"))return null;
+        Map<String,Object> row=new LinkedHashMap<>();
+        row.put("match_set_id",Map.of("type","integer"));
+        row.put("source_address",Map.of("type","string"));
+        row.put("destination_address",Map.of("type","string"));
+        row.put("source_length",Map.of("type","integer"));
+        row.put("destination_length",Map.of("type","integer"));
+        row.put("type",Map.of("type","string"));
+        row.put("status",Map.of("type","string"));
+        row.put("similarity",Map.of("type",List.of("number","null"),"description","Native VT similarity from VTMatch.getSimilarityScore (typically 0-1). Not a custom matcher score. A high score is not automatic acceptance."));
+        row.put("confidence",Map.of("type",List.of("number","null"),"description","Native VT confidence from VTMatch.getConfidenceScore. Not comparable across correlators or custom matchers. A high score is not automatic acceptance."));
+        row.put("source_name",Map.of("type",List.of("string","null"),"description","Function or data name at the source address; JSON null when no native name exists."));
+        row.put("destination_name",Map.of("type",List.of("string","null"),"description","Function or data name at the destination address; JSON null when no native name exists."));
+        row.put("source_name_source",Map.of("type",List.of("string","null"),"description","Native SourceType of the source function symbol or data label."));
+        row.put("destination_name_source",Map.of("type",List.of("string","null"),"description","Native SourceType of the destination function symbol or data label."));
+        row.put("correlator",Map.of("type",List.of("string","null"),"description","VTMatchSet.getProgramCorrelatorInfo().getName(); Manual Match and Implied Match are built-in set names."));
+        row.put("match_set_provenance",Map.of("type",List.of("string","null"),"description","manual/implied from VTSession built-in sets; otherwise correlator. Duplicate associations remain distinct by match_set_id."));
+        Map<String,Object> item=new LinkedHashMap<>();
+        item.put("type","object");item.put("properties",row);item.put("required",new ArrayList<>(row.keySet()));item.put("additionalProperties",false);
+        Map<String,Object> props=new LinkedHashMap<>();
+        props.put("matches",Map.of("type","array","maxItems",VTSupport.MAX_LIMIT,"items",item));
+        props.put("offset",Map.of("type","integer","minimum",0));
+        props.put("limit",Map.of("type","integer","minimum",1,"maximum",VTSupport.MAX_LIMIT));
+        props.put("total",Map.of("type","integer","minimum",0,"description","Count of matches that passed filters; produced by scanning without retaining native VTMatch objects."));
+        props.put("truncated",Map.of("type","boolean"));
+        props.put("has_more",Map.of("type","boolean"));
+        props.put("next_offset",Map.of("type",List.of("integer","null"),"description","Continuation offset when has_more is true. JSON null on the last page or when page_window_exhausted; never 5000/unusable."));
+        props.put("page_window_exhausted",Map.of("type","boolean","description","True when more filtered matches exist but offset+limit cannot grow past MAX_PAGE_WINDOW; use filters instead of next_offset."));
+        props.put("requires_filter",Map.of("type","boolean","description","True with page_window_exhausted: continuation is not available; narrow status/match_set_id/min_score."));
+        props.put("session_revision",Map.of("type","integer","description","VTSession/DomainObject getModificationNumber for paging; a later mismatch invalidates continuation."));
+        props.put("source_program_id",Map.of("type","string"));
+        props.put("source_revision",Map.of("type","integer"));
+        props.put("destination_program_id",Map.of("type","string"));
+        props.put("destination_revision",Map.of("type","integer"));
+        props.put("match_set_count",Map.of("type","integer","minimum",0));
+        props.put("paging_identity",Map.of("type","string"));
+        Map<String,Object> schema=new LinkedHashMap<>();
+        schema.put("type","object");schema.put("properties",props);
+        schema.put("required",List.of("matches","offset","limit","total","truncated","has_more","next_offset","session_revision","source_program_id","source_revision","destination_program_id","destination_revision","match_set_count"));
+        schema.put("additionalProperties",false);
+        return schema;
     }
     @Override public boolean isReadOnly(){return Set.of("vt_sessions","vt_correlators","vt_matches","vt_markup").contains(name);}
     @Override public boolean isLongRunning(){return Set.of("vt_correlate","vt_markup","vt_apply_markup","vt_unapply_markup").contains(name);}
@@ -143,9 +196,7 @@ public final class VTTool implements McpTool {
         try{VTMatchSet set=c.correlate(s,m);m.checkCancelled();commit=true;return VTSupport.result(Map.of("match_set_id",set.getID(),"match_count",set.getMatchCount(),"correlator",c.getName(),"saved",false));}finally{s.endTransaction(tx,commit);}
     }
     private McpSchema.CallToolResult matches(Map<String,Object>a,TaskMonitor m)throws Exception{
-        VTSessionDB s=VTSupport.session(a,m);int off=VTSupport.offset(a),limit=VTSupport.limit(a),total=0;List<Map<String,Object>> rows=new ArrayList<>();
-        for(VTMatchSet set:s.getMatchSets())for(VTMatch match:set.getMatches()){m.checkCancelled();if(total>=off&&rows.size()<limit)rows.add(VTSupport.match(match));total++;}
-        return VTSupport.result(Map.of("matches",rows,"offset",off,"limit",limit,"total",total,"truncated",(long)off+rows.size()<total));
+        return VTSupport.result(VTSupport.queryMatches(VTSupport.session(a,m),a,m));
     }
     private McpSchema.CallToolResult review(Map<String,Object>a,TaskMonitor m)throws Exception{
         VTSessionDB s=VTSupport.session(a,m);VTSupport.writable(s);VTMatch match=VTSupport.find(s,a);

@@ -91,7 +91,7 @@ public class ReadMemoryBatchTool implements McpTool {
         out.add(row);
       }
       boolean truncated = out.stream().anyMatch(value -> Boolean.TRUE.equals(((Map<?, ?>) value).get("truncated")));
-      return ProjectToolSupport.result(
+      return BatchQuerySupport.boundedResult(
           Map.of(
               "results",
               out,

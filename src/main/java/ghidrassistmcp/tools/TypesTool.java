@@ -33,6 +33,13 @@ public class TypesTool implements McpTool {
     public boolean isReadOnly() { return false; }
 
     @Override
+    public boolean isReadOnly(Map<String, Object> arguments) {
+        Object action = arguments == null ? null : arguments.get("action");
+        return action instanceof String && ("get".equalsIgnoreCase((String) action)
+            || "list".equalsIgnoreCase((String) action));
+    }
+
+    @Override
     public boolean isIdempotent() { return true; }
 
     @Override

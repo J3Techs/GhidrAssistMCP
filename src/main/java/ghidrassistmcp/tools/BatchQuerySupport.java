@@ -7,12 +7,38 @@ import ghidra.program.model.symbol.Symbol;
 import java.math.BigInteger;
 import java.util.*;
 import java.util.regex.Pattern;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 /** Small, side-effect-free helpers shared by bounded batch query tools. */
 final class BatchQuerySupport {
   static final int MAX_ROWS = 1000, MAX_BYTES = 1 << 20, MAX_FIELDS = 64;
 
   private BatchQuerySupport() {}
+  static final int AGGREGATE_RESULT_BYTES = 120_000;
+  private static final ObjectMapper JSON = new ObjectMapper();
+
+  static io.modelcontextprotocol.spec.McpSchema.CallToolResult boundedResult(Map<String,Object> result) {
+    try {
+      checkBytes(result, AGGREGATE_RESULT_BYTES / 2);
+      var complete = ProjectToolSupport.result(result);
+      checkBytes(complete, AGGREGATE_RESULT_BYTES);
+      return complete;
+    } catch (Exception e) {
+      return ProjectToolSupport.result(Map.of("error", "RESULT_TOO_LARGE", "max_encoded_bytes", AGGREGATE_RESULT_BYTES,
+          "message", "Result exceeds the complete response budget or cannot be encoded; reduce page/batch size and per-row limits"), true);
+    }
+  }
+  private static void checkBytes(Object value, long maximum) throws java.io.IOException {
+    JSON.writeValue(new java.io.OutputStream() {
+      long count;
+      public void write(int value) throws java.io.IOException { if (++count > maximum) throw new java.io.IOException("budget"); }
+      public void write(byte[] bytes, int offset, int length) throws java.io.IOException { count += length; if (count > maximum) throw new java.io.IOException("budget"); }
+    }, value);
+  }
+  static io.modelcontextprotocol.spec.McpSchema.CallToolResult boundedResult(Map<String,Object> result, boolean error) {
+    var r = boundedResult(result); return error && !Boolean.TRUE.equals(r.isError()) ?
+      io.modelcontextprotocol.spec.McpSchema.CallToolResult.builder().content(r.content()).structuredContent(r.structuredContent()).isError(true).build() : r;
+  }
 
   static int integer(Map<String, Object> a, String k, int d, int max) {
     if (!a.containsKey(k)) return d;

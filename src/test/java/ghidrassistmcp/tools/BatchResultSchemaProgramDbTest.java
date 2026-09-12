@@ -150,6 +150,7 @@ class BatchResultSchemaProgramDbTest {
         var backend = new GhidrAssistMCPBackend() {
             @Override public Program getCurrentProgram() { return program; }
         };
+        backend.setAsyncReadGraceMillis(0); // Exercise the task branch explicitly, including fast fixture reads.
         try {
             for (McpTool tool : List.of(new FunctionInventoryTool(), new XrefsBatchTool())) {
                 var args = tool instanceof XrefsBatchTool ? Map.<String, Object>of("addresses", List.of("1008")) : Map.<String, Object>of("limit", 1);

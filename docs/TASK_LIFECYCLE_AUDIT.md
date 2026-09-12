@@ -1,5 +1,7 @@
 # Generic task lifecycle and cache audit
 
+The subsequent workflow upgrade adds finite admission/retention, a configurable inline read window, and `wait_task(include_result=true)`. See [release notes](UPGRADE_RELEASE_NOTES.md) and [final validation](UPGRADE_FINAL_VALIDATION_2026-09-12.md); this audit remains historical context.
+
 Reviewed and implemented September 11, 2026. These APIs are the existing
 GhidrAssistMCP custom async tool lifecycle, **not** a claim of negotiated MCP Tasks
 extension support. BSim jobs retain their separate lifecycle and journal.

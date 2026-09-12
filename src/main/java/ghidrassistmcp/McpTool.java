@@ -75,6 +75,14 @@ public interface McpTool {
     }
 
     /**
+     * Invocation-specific read classification used by the execution guard.
+     * Catalog annotations intentionally remain static and conservative.
+     */
+    default boolean isReadOnly(Map<String, Object> arguments) {
+        return isReadOnly();
+    }
+
+    /**
      * Indicates whether the tool is destructive.
      * Destructive tools may delete data, remove functions, or cause irreversible changes.
      * Default: false
@@ -110,6 +118,11 @@ public interface McpTool {
      */
     default boolean isLongRunning() {
         return false;
+    }
+
+    /** Invocation-specific async classification; defaults to the static trait. */
+    default boolean isLongRunning(Map<String, Object> arguments) {
+        return isLongRunning();
     }
 
     // ==================== Caching Support ====================

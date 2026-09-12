@@ -4,13 +4,13 @@
 package ghidrassistmcp.tasks;
 
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.CancellationException;
@@ -18,6 +18,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import ghidra.util.Msg;
 import io.modelcontextprotocol.spec.McpSchema;
@@ -30,11 +31,20 @@ public class McpTaskManager {
 
     private static final int DEFAULT_THREAD_POOL_SIZE = 4;
     private static final int TASK_RETENTION_HOURS = 1;
+    private static final int DEFAULT_QUEUE_CAPACITY = 64;
+    private static final long DEFAULT_MAX_TOTAL_RESULT_BYTES = 64L * 1024 * 1024;
+    private static final long DEFAULT_MAX_RESULT_BYTES = 4L * 1024 * 1024;
+    private static final int DEFAULT_MAX_TERMINAL_TASKS = 1024;
 
     private final Map<String, McpTask> tasks = new ConcurrentHashMap<>();
     private final Map<String, Future<?>> taskFutures = new ConcurrentHashMap<>();
     private final Map<String, Runnable> taskCleanup = new ConcurrentHashMap<>();
-    private final ExecutorService executor;
+    private final ThreadPoolExecutor executor;
+    private final long maxTotalResultBytes, maxResultBytes, retentionMillis;
+    private final int maxTerminalTasks;
+    private final java.util.concurrent.atomic.AtomicLong retainedResultBytes = new java.util.concurrent.atomic.AtomicLong();
+    private final Object retentionLock = new Object();
+    private static final ObjectMapper JSON = new ObjectMapper();
     private final String instanceId = java.util.UUID.randomUUID().toString();
 
     public String getInstanceId() { return instanceId; }
@@ -66,19 +76,36 @@ public class McpTaskManager {
      * Create a new task manager with default thread pool size
      */
     public McpTaskManager() {
-        this(DEFAULT_THREAD_POOL_SIZE);
+        this(DEFAULT_THREAD_POOL_SIZE, DEFAULT_QUEUE_CAPACITY);
     }
 
     /**
      * Create a new task manager with specified thread pool size
      */
     public McpTaskManager(int threadPoolSize) {
-        this.executor = Executors.newFixedThreadPool(threadPoolSize, r -> {
+        this(threadPoolSize, DEFAULT_QUEUE_CAPACITY);
+    }
+
+    public McpTaskManager(int threadPoolSize, int queueCapacity) {
+        this(threadPoolSize, queueCapacity, DEFAULT_MAX_TOTAL_RESULT_BYTES, DEFAULT_MAX_RESULT_BYTES,
+            DEFAULT_MAX_TERMINAL_TASKS, TimeUnit.HOURS.toMillis(TASK_RETENTION_HOURS));
+    }
+
+    /** Injectable limits make admission and retention behavior deterministic in fixture tests. */
+    public McpTaskManager(int threadPoolSize, int queueCapacity, long maxTotalResultBytes,
+            long maxResultBytes, int maxTerminalTasks, long retentionMillis) {
+        if (threadPoolSize < 1 || queueCapacity < 1 || maxTotalResultBytes < 0 || maxResultBytes < 0
+                || maxTerminalTasks < 1 || retentionMillis < 0)
+            throw new IllegalArgumentException("invalid task manager limits");
+        this.maxTotalResultBytes = maxTotalResultBytes; this.maxResultBytes = maxResultBytes;
+        this.maxTerminalTasks = maxTerminalTasks; this.retentionMillis = retentionMillis;
+        this.executor = new ThreadPoolExecutor(threadPoolSize, threadPoolSize, 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(queueCapacity), r -> {
             Thread t = new Thread(r);
             t.setName("MCP-Task-" + t.threadId());
             t.setDaemon(true);
             return t;
-        });
+        }, new ThreadPoolExecutor.AbortPolicy());
         Msg.info(this, "McpTaskManager initialized with " + threadPoolSize + " threads");
     }
 
@@ -130,10 +157,13 @@ public class McpTaskManager {
                 if (result == null) {
                     task.markFailed("Operation returned no result");
                 } else if (Boolean.TRUE.equals(result.isError())) {
+                    retainResult(task, result);
                     task.markFailed("Operation returned an MCP error", result);
                 } else {
+                    retainResult(task, result);
                     task.markCompleted(result);
                 }
+                cleanupOldTasks();
 
                 Msg.info(this, "Task completed: " + task.getTaskId() + " in " + task.getDurationMillis() + "ms");
 
@@ -148,7 +178,7 @@ public class McpTaskManager {
                     task.markFailed(e.getMessage());
                     Msg.error(this, "Task failed: " + task.getTaskId() + " - " + e.getMessage(), e);
                 }
-            } finally { releaseTask(task.getTaskId()); }
+            } finally { cleanupOldTasks(); taskFutures.remove(task.getTaskId()); releaseTask(task.getTaskId()); }
         }, null);
         // Publish the cancellation handle before admitting execution; a fast worker or
         // concurrent cancellation must never observe a task without its Future.
@@ -170,6 +200,7 @@ public class McpTaskManager {
      * Get a task by ID
      */
     public McpTask getTask(String taskId) {
+        cleanupOldTasks();
         return tasks.get(taskId);
     }
 
@@ -177,6 +208,7 @@ public class McpTaskManager {
      * Get task status summary
      */
     public String getTaskStatus(String taskId) {
+        cleanupOldTasks();
         McpTask task = tasks.get(taskId);
         if (task == null) {
             return "Task not found: " + taskId;
@@ -188,7 +220,7 @@ public class McpTaskManager {
      * Get the result of a completed task
      */
     public McpSchema.CallToolResult getTaskResult(String taskId) {
-        McpTask task = tasks.get(taskId);
+        McpTask task = getTask(taskId);
         if (task == null) {
             return McpSchema.CallToolResult.builder()
                 .isError(true)
@@ -202,15 +234,27 @@ public class McpTaskManager {
                 .build();
         }
 
-        if (task.getStatus() == McpTask.Status.COMPLETED && task.getResult() != null) {
-            return task.getResult();
+        McpSchema.CallToolResult retained = task.getResult();
+        if (retained != null) return retained;
+        String retentionCode = task.getResultRetentionCode();
+        if (retentionCode != null) {
+            return McpSchema.CallToolResult.builder().isError(true)
+                .structuredContent(Map.of("code", retentionCode, "task_id", taskId,
+                    "operation_status", task.getStatus().name(), "result_available", false))
+                .addTextContent(retentionCode + ": terminal payload is unavailable; operation status is " + task.getStatus())
+                .build();
         }
 
         if (task.getStatus() == McpTask.Status.FAILED) {
-            if (task.getResult() != null) return task.getResult();
             return McpSchema.CallToolResult.builder()
                 .isError(true)
                 .addTextContent("Task failed: " + task.getErrorMessage())
+                .build();
+        }
+
+        if (task.getStatus() == McpTask.Status.COMPLETED && task.getResultRetentionCode() != null) {
+            return McpSchema.CallToolResult.builder().isError(true)
+                .addTextContent(task.getResultRetentionCode() + ": terminal task result was evicted; operation status is COMPLETED")
                 .build();
         }
 
@@ -244,8 +288,10 @@ public class McpTaskManager {
         if (!requested) return false;
         if (future != null) {
             boolean stoppedBeforeStart = future.cancel(true);
-            // A queued Future never invokes the worker to settle the task.
-            if (stoppedBeforeStart && task.getStartedAt() == null) { task.markCancelled(); releaseTask(taskId); }
+            // Remove a queued Future so rejection capacity is returned immediately.
+            if (stoppedBeforeStart && task.getStartedAt() == null) {
+                executor.remove((Runnable) future); task.markCancelled(); taskFutures.remove(taskId); releaseTask(taskId);
+            }
         }
         Msg.info(this, "Cancellation requested: " + taskId);
         return true;
@@ -255,6 +301,7 @@ public class McpTaskManager {
      * List all tasks with optional status filter
      */
     public List<McpTask> listTasks(McpTask.Status statusFilter) {
+        cleanupOldTasks();
         if (statusFilter == null) {
             return new ArrayList<>(tasks.values());
         }
@@ -307,7 +354,8 @@ public class McpTaskManager {
      * Clean up old completed tasks
      */
     private void cleanupOldTasks() {
-        Instant cutoff = Instant.now().minus(TASK_RETENTION_HOURS, ChronoUnit.HOURS);
+        synchronized (retentionLock) {
+        Instant cutoff = Instant.now().minusMillis(retentionMillis);
 
         List<String> toRemove = tasks.entrySet().stream()
             .filter(e -> e.getValue().isTerminal())
@@ -316,13 +364,50 @@ public class McpTaskManager {
             .collect(Collectors.toList());
 
         for (String taskId : toRemove) {
-            tasks.remove(taskId);
+            McpTask removed = tasks.remove(taskId);
+            if (removed != null) evictPayload(removed);
             taskFutures.remove(taskId);
+        }
+
+        List<McpTask> terminal = tasks.values().stream().filter(McpTask::isTerminal)
+            .sorted(java.util.Comparator.comparing(McpTask::getCompletedAt, java.util.Comparator.nullsLast(java.util.Comparator.naturalOrder())))
+            .collect(Collectors.toList());
+        for (int i = 0; i < Math.max(0, terminal.size() - maxTerminalTasks); i++) {
+            McpTask old = terminal.get(i);
+            evictPayload(old);
+            tasks.remove(old.getTaskId(), old);
+            taskFutures.remove(old.getTaskId());
         }
 
         if (!toRemove.isEmpty()) {
             Msg.info(this, "Cleaned up " + toRemove.size() + " old tasks");
         }
+        }
+    }
+
+    private void retainResult(McpTask task, McpSchema.CallToolResult result) {
+        synchronized (retentionLock) {
+        if (result == null) return;
+        final long bytes;
+        try {
+            bytes = JSON.writeValueAsBytes(result).length;
+        }
+        catch (Exception e) { task.discardResult("RESULT_TOO_LARGE"); return; }
+        if (bytes > maxResultBytes) { task.discardResult("RESULT_TOO_LARGE"); return; }
+        while (retainedResultBytes.get() + bytes > maxTotalResultBytes) {
+            McpTask victim = tasks.values().stream().filter(t -> t != task && t.isTerminal() && t.getResult() != null)
+                .min(java.util.Comparator.comparing(McpTask::getCompletedAt, java.util.Comparator.nullsLast(java.util.Comparator.naturalOrder()))).orElse(null);
+            if (victim == null) { task.discardResult("RESULT_EXPIRED"); return; }
+            evictPayload(victim);
+        }
+        task.setRetainedResultBytes(bytes); retainedResultBytes.addAndGet(bytes);
+        }
+    }
+
+    private void evictPayload(McpTask task) {
+        long bytes = task.getRetainedResultBytes();
+        if (bytes == 0 && task.getResult() == null) return;
+        task.discardResult("RESULT_EXPIRED"); retainedResultBytes.addAndGet(-bytes);
     }
 
     /**

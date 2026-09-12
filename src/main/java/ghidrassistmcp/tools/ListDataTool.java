@@ -32,13 +32,13 @@ public class ListDataTool implements McpTool {
     public McpSchema.JsonSchema getInputSchema() {
         return new McpSchema.JsonSchema("object", 
             Map.of(
-                "offset", new McpSchema.JsonSchema("integer", null, null, null, null, null),
-                "limit", new McpSchema.JsonSchema("integer", null, null, null, null, null),
+                "offset", QueryPageBounds.offsetSchema(),
+                "limit", QueryPageBounds.limitSchema(),
                 "data_type_filter", new McpSchema.JsonSchema("string", null, null, null, null, null)
             ),
             List.of(), null, null, null);
     }
-    
+
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
         if (currentProgram == null) {
@@ -48,18 +48,15 @@ public class ListDataTool implements McpTool {
         }
         
         // Parse optional parameters
-        int offset = 0;
-        int limit = 100; // Default limit
+        final int offset;
+        final int limit;
+        try {
+            offset = QueryPageBounds.integer(arguments, "offset", 0, 0, Integer.MAX_VALUE);
+            limit = QueryPageBounds.integer(arguments, "limit", 100, 1, QueryPageBounds.MAX_LIMIT);
+        } catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
         String dataTypeFilter = (String) arguments.get("data_type_filter");
         
-        if (arguments.get("offset") instanceof Number) {
-            offset = ((Number) arguments.get("offset")).intValue();
-        }
-        if (arguments.get("limit") instanceof Number) {
-            limit = ((Number) arguments.get("limit")).intValue();
-        }
-        
-        StringBuilder result = new StringBuilder();
+        BoundedQueryText result = new BoundedQueryText(BoundedQueryText.PAGE_CHARS - 1024);
         result.append("Defined Data Elements");
         if (dataTypeFilter != null) {
             result.append(" (filtered by: ").append(dataTypeFilter).append(")");
@@ -70,6 +67,7 @@ public class ListDataTool implements McpTool {
         
         int count = 0;
         int totalCount = 0;
+        boolean rendering = true;
         
         while (dataIter.hasNext()) {
             Data data = dataIter.next();
@@ -90,7 +88,7 @@ public class ListDataTool implements McpTool {
             }
             
             // Apply limit to displayed results only; keep scanning for a true total.
-            if (count < limit) {
+            if (count < limit && rendering) {
                 DataType dataType = data.getDataType();
                 String typeName = dataType != null ? dataType.getName() : "unknown";
                 String value = data.getDefaultValueRepresentation();
@@ -114,6 +112,7 @@ public class ListDataTool implements McpTool {
 
                 result.append("\n");
                 count++;
+                if (result.full()) { count--; rendering = false; }
             }
         }
         
@@ -130,8 +129,10 @@ public class ListDataTool implements McpTool {
             }
         }
         
-        return McpSchema.CallToolResult.builder()
-            .addTextContent(result.toString())
-            .build();
+        boolean hasMore = (long) offset + count < totalCount;
+        String footer = "\nPage: offset=" + offset + ", limit=" + limit + ", has_more=" + hasMore
+            + (hasMore ? ", next_offset=" + ((long) offset + count) : "")
+            + (result.full() ? ", details_truncated=true; request the next page or narrower output" : "");
+        return McpSchema.CallToolResult.builder().addTextContent(result.toString() + footer).build();
     }
 }

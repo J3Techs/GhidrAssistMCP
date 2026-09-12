@@ -58,7 +58,10 @@ public class SetLocalVariableTypeTool implements McpTool {
             Map.of(
                 "function_name", new McpSchema.JsonSchema("string", null, null, null, null, null),
                 "variable_name", new McpSchema.JsonSchema("string", null, null, null, null, null),
-                "data_type", new McpSchema.JsonSchema("string", null, null, null, null, null)
+                "data_type", new McpSchema.JsonSchema("string", null, null, null, null, null),
+                "return_code", new McpSchema.JsonSchema("boolean", null, null, null, null, null),
+                "max_chars", new McpSchema.JsonSchema("integer", null, null, null, null, null),
+                "verification_timeout_seconds", new McpSchema.JsonSchema("integer", null, null, null, null, null)
             ),
             List.of("function_name", "variable_name", "data_type"), null, null, null);
     }
@@ -67,13 +70,27 @@ public class SetLocalVariableTypeTool implements McpTool {
 
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> args, Program program) {
-        return VariableRetypeSupport.execute(decompilerService, args, program, new ghidra.util.task.TaskMonitorAdapter(true));
+        String optionError = PostMutationCode.validateOptions(args);
+        if (optionError != null) return ProjectToolSupport.error(optionError);
+        Function selected = Boolean.TRUE.equals(args.get("return_code")) && program != null ? FunctionLookup.resolve(program, String.valueOf(args.get("function_name"))) : null;
+        if (Boolean.TRUE.equals(args.get("return_code")) && selected == null)
+            return ProjectToolSupport.error("Function not found: " + args.get("function_name"));
+        McpSchema.CallToolResult mutation = VariableRetypeSupport.execute(decompilerService, args, program, new ghidra.util.task.TaskMonitorAdapter(true));
+        if (!Boolean.TRUE.equals(args.get("return_code")) || Boolean.TRUE.equals(mutation.isError())) return mutation;
+        return PostMutationCode.result(program, selected, null, decompilerService, args);
     }
 
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> args, Program program,
             ghidrassistmcp.GhidrAssistMCPBackend backend, ghidrassistmcp.tasks.McpTask task) {
-        return VariableRetypeSupport.execute(decompilerService, args, program,
+        String optionError = PostMutationCode.validateOptions(args);
+        if (optionError != null) return ProjectToolSupport.error(optionError);
+        Function selected = Boolean.TRUE.equals(args.get("return_code")) && program != null ? FunctionLookup.resolve(program, String.valueOf(args.get("function_name"))) : null;
+        if (Boolean.TRUE.equals(args.get("return_code")) && selected == null)
+            return ProjectToolSupport.error("Function not found: " + args.get("function_name"));
+        McpSchema.CallToolResult mutation = VariableRetypeSupport.execute(decompilerService, args, program,
             task == null ? new ghidra.util.task.TaskMonitorAdapter(true) : new ghidrassistmcp.tasks.McpTaskMonitor(task, 0, 100, "Retype Variable"));
+        if (!Boolean.TRUE.equals(args.get("return_code")) || Boolean.TRUE.equals(mutation.isError())) return mutation;
+        return PostMutationCode.result(program, selected, null, decompilerService, args);
     }
 }

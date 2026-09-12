@@ -102,13 +102,14 @@ public class GetHexdumpTool implements McpTool {
      * Format: ADDRESS  HEX_BYTES (16 per line, grouped by 8)  |ASCII|
      */
     private String generateHexdump(Program program, Address startAddr, int length) throws ghidra.program.model.address.AddressOverflowException {
-        StringBuilder result = new StringBuilder();
+        BoundedQueryText result = new BoundedQueryText(BoundedQueryText.PAGE_CHARS - 1024);
         Memory memory = program.getMemory();
 
         result.append("Hexdump at ").append(startAddr).append(" (").append(length).append(" bytes):\n\n");
 
         int bytesRead = 0;
         int unreadable = 0;
+        int completeBytes = 0;
 
         while (bytesRead < length) {
             // Calculate how many bytes to read on this line
@@ -135,10 +136,15 @@ public class GetHexdumpTool implements McpTool {
             result.append("\n");
 
             bytesRead += actualBytesRead;
+            if (result.full()) break;
+            completeBytes = bytesRead;
         }
 
-        result.append("Unreadable bytes: ").append(unreadable).append(" (?? in hex, ? in ASCII).\n");
-        return result.toString();
+        String footer = "\nUnreadable bytes: " + unreadable + " (among inspected bytes; ?? in hex, ? in ASCII).\n"
+            + "Complete bytes displayed: " + completeBytes + "; output_truncated=" + result.full() + ".\n";
+        if (completeBytes < length) footer += "Continue at address " + startAddr.addNoWrap(completeBytes)
+            + " with len=" + (length - completeBytes) + " (repeats any partial line).\n";
+        return result.toString() + footer;
     }
 
     /**

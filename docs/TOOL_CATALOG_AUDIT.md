@@ -1,5 +1,7 @@
 # Tool and feature catalog audit
 
+Historical baseline. The subsequent workflow upgrade adds `port_ledger` (146 registered tools), compact discovery, bounded task completion and matcher/transfer changes. See [release notes](UPGRADE_RELEASE_NOTES.md) and [final validation](UPGRADE_FINAL_VALIDATION_2026-09-12.md) for the current contract and evidence.
+
 Reviewed 2026-09-11 against checkout base `5b3a058` and the working modernization changes. This is a fresh source and contract review, not a claim that every operation has been exercised in a live Ghidra installation. No user program, database, repository, or script was executed during this audit.
 
 ## Contract baseline

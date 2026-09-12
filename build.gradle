@@ -94,6 +94,51 @@ tasks.named('test') {
     systemProperty 'ghidra.install.dir', ghidraInstallDir
 }
 
+tasks.register('writeUpgradeFixtureArgs') {
+    dependsOn 'testClasses'
+    doLast {
+        def destination = layout.buildDirectory.file('upgrade-fixture-java.args').get().asFile
+        def quoted = { value -> '"' + value.toString().replace('\\', '/').replace('"', '\\"') + '"' }
+        destination.text = '-Dghidra.install.dir=' + quoted(ghidraInstallDir) + '\n-classpath\n' +
+            quoted(sourceSets.test.runtimeClasspath.asPath) + '\nghidrassistmcp.UpgradeFixtureServer\n'
+    }
+}
+
+def operatingGuide = file('src/main/resources/ghidrassistmcp/operating-guide.md')
+def clientGuideCopies = [
+    'claude-code-integration/skills/port-functions/references/operating-guide.md',
+    'claude-code-integration/skills/deep-function/references/operating-guide.md',
+    'grok-integration/references/operating-guide.md'
+].collect { file(it) }
+
+tasks.register('syncOperatingGuides') {
+    group = 'documentation'
+    description = 'Copy the canonical server guide into standalone client packages'
+    inputs.file operatingGuide
+    outputs.files clientGuideCopies
+    doLast { clientGuideCopies.each { target ->
+        target.parentFile.mkdirs()
+        target.bytes = operatingGuide.bytes
+    } }
+}
+tasks.register('checkOperatingGuides') {
+    group = 'verification'
+    mustRunAfter 'syncOperatingGuides'
+    description = 'Reject drift between the server guide and packaged client copies'
+    inputs.file operatingGuide
+    inputs.files clientGuideCopies
+    doLast { clientGuideCopies.each { target ->
+        if (!target.exists() || !Arrays.equals(operatingGuide.bytes, target.bytes)) {
+            throw new GradleException("Operating guide drift: ${target}. Run syncOperatingGuides.")
+        }
+    } }
+}
+tasks.named('check') { dependsOn 'checkOperatingGuides' }
+tasks.named('buildExtension') {
+    dependsOn 'checkOperatingGuides'
+    exclude '.claude-plugin/**', 'claude-code-integration/**', 'grok-integration/**', '.agents/**', 'validation/**'
+}
+
 def generatedBuildInfo = layout.buildDirectory.dir('generated/build-info')
 tasks.register('generateBuildInfo') {
     outputs.dir(generatedBuildInfo)
@@ -103,6 +148,15 @@ tasks.register('generateBuildInfo') {
         props.setProperty('revision', providers.exec { commandLine 'git', 'rev-parse', 'HEAD' }.standardOutput.asText.get().trim())
         props.setProperty('dirty', (!providers.exec { commandLine 'git', 'status', '--porcelain' }.standardOutput.asText.get().trim().isEmpty()).toString())
         props.setProperty('built_at', java.time.Instant.now().toString())
+        def digest = java.security.MessageDigest.getInstance('SHA-256')
+        def sourceInputs = (fileTree('src/main').files + [file('build.gradle'), file('extension.properties')]).sort { relativePath(it).replace('\\', '/') }
+        sourceInputs.each { input ->
+            digest.update(relativePath(input).replace('\\', '/').getBytes('UTF-8'))
+            digest.update((byte) 0)
+            digest.update(input.bytes)
+            digest.update((byte) 0)
+        }
+        props.setProperty('source_sha256', java.util.HexFormat.of().formatHex(digest.digest()))
         def destination = generatedBuildInfo.get().file('build-info.properties').asFile
         destination.parentFile.mkdirs()
         destination.withOutputStream { props.store(it, 'GhidrAssistMCP build provenance') }

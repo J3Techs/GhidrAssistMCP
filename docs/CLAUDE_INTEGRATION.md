@@ -1,0 +1,9 @@
+# Claude Code integration
+
+The versioned `ghidrassist` plugin is under [`claude-code-integration/`](../claude-code-integration/). Install it through [`.claude-plugin/marketplace.json`](../.claude-plugin/marketplace.json); its HTTP server configuration preserves the `ghidrassist` server key.
+
+The package provides `port-functions` and `deep-function`. Both load plugin-local operating-guide references and use the server's advertised schemas. Positional arguments accept whitespace-free project paths, resolved once to exact program IDs; ambiguous paths require explicit selection. For example, `/ghidrassist:port-functions /source.bin /target.bin selected-functions`.
+
+Run `syncOperatingGuides` after changing the canonical server guide; `checkOperatingGuides` rejects drift and is included in `check` and `buildExtension`. Plugin structure and argument substitution follow the [official plugin reference](https://code.claude.com/docs/en/plugins-reference) and [skill documentation](https://code.claude.com/docs/en/skills). A direct isolated `--plugin-dir` smoke with Claude Code 2.1.269 invoked `mcp__ghidrassist__runtime_capabilities` and `mcp__ghidrassist__list_binaries` successfully. The loaded Ghidra runtime was an older build that rejected the new optional arguments and returned the legacy prose listing, so new-contract acceptance still requires a restarted runtime.
+
+Against the disposable fixture endpoint, the same isolated client accepted `include_programs=false` and `limit=1`, returned a SHA-256 inventory cursor, preserved the `space # selector` program ID, and reported the target's exact opaque ID. This validates discovery and argument handling for the fixture; the longer mutation/save/close/reopen prompt did not return a captured result, so mutation persistence is not claimed from that attempt.

@@ -8,24 +8,15 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
-
-import javax.swing.SwingUtilities;
-
-import ghidra.app.cmd.function.ApplyFunctionSignatureCmd;
 import ghidra.app.decompiler.DecompileResults;
-import ghidra.app.util.parser.FunctionSignatureParser;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.data.DataType;
-import ghidra.program.model.data.DataTypeManager;
-import ghidra.program.model.data.FunctionDefinitionDataType;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.model.pcode.HighSymbol;
 import ghidra.program.model.pcode.HighVariable;
 import ghidra.program.model.symbol.SourceType;
-import ghidra.util.task.ConsoleTaskMonitor;
 import ghidra.util.task.TaskMonitor;
 import ghidrassistmcp.McpTool;
 import ghidrassistmcp.decompiler.DecompilerService;
@@ -44,10 +35,20 @@ public class VariablesTool implements McpTool {
     public boolean isReadOnly() { return false; }
 
     @Override
+    public boolean isReadOnly(Map<String, Object> arguments) {
+        return actionIs(arguments, "list");
+    }
+
+    @Override
     public boolean isIdempotent() { return true; }
 
     @Override
     public boolean isLongRunning() { return true; }
+
+    private static boolean actionIs(Map<String, Object> arguments, String expected) {
+        Object action = arguments == null ? null : arguments.get("action");
+        return action instanceof String && expected.equalsIgnoreCase((String) action);
+    }
 
     @Override
     public String getName() { return "variables"; }
@@ -106,13 +107,18 @@ public class VariablesTool implements McpTool {
                 Map.entry("prototype", Map.of(
                     "type", "string",
                     "description", "Function prototype/signature string (required for set_prototype)"
-                ))
+                )),
+                Map.entry("return_code", Map.of("type", "boolean", "default", false)),
+                Map.entry("max_chars", Map.of("type", "integer", "minimum", 1, "maximum", 200000)),
+                Map.entry("verification_timeout_seconds", Map.of("type", "integer", "minimum", 1, "maximum", 300))
             ),
             List.of("action"), null, null, null);
     }
 
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
+        String optionError = PostMutationCode.validateOptions(arguments);
+        if (optionError != null) return ProjectToolSupport.error(optionError);
         if (currentProgram == null) {
             return ProjectToolSupport.error("No program currently loaded");
         }
@@ -257,62 +263,21 @@ public class VariablesTool implements McpTool {
     }
 
     private McpSchema.CallToolResult executeRetype(Map<String, Object> args, Program program) {
-        return VariableRetypeSupport.execute(decompilerService, args, program, new ghidra.util.task.TaskMonitorAdapter(true));
+        return new SetLocalVariableTypeTool(decompilerService).execute(args, program);
     }
 
     @Override public McpSchema.CallToolResult execute(Map<String, Object> args, Program program,
             ghidrassistmcp.GhidrAssistMCPBackend backend, ghidrassistmcp.tasks.McpTask task) {
-        if ("retype".equalsIgnoreCase(String.valueOf(args.get("action"))))
-            return VariableRetypeSupport.execute(decompilerService, args, program,
-                task == null ? new ghidra.util.task.TaskMonitorAdapter(true) : new ghidrassistmcp.tasks.McpTaskMonitor(task, 0, 100, "Retype Variable"));
+        String optionError = PostMutationCode.validateOptions(args);
+        if (optionError != null) return ProjectToolSupport.error(optionError);
+        if ("retype".equalsIgnoreCase(String.valueOf(args.get("action")))) {
+            return new SetLocalVariableTypeTool(decompilerService).execute(args, program, backend, task);
+        }
         return execute(args, program);
     }
 
     private McpSchema.CallToolResult executeSetPrototype(Map<String, Object> arguments, Program program) {
-        String functionAddrStr = (String) arguments.get("function_address");
-        String prototype = (String) arguments.get("prototype");
-        if (functionAddrStr == null || prototype == null) {
-            return result("function_address and prototype are required for set_prototype");
-        }
-
-        final StringBuilder errorMessage = new StringBuilder();
-        final AtomicBoolean success = new AtomicBoolean(false);
-
-        try {
-            SwingUtilities.invokeAndWait(() -> {
-                Address addr = program.getAddressFactory().getAddress(functionAddrStr);
-                if (addr == null) { errorMessage.append("Invalid address: " + functionAddrStr); return; }
-
-                Function func = program.getFunctionManager().getFunctionAt(addr);
-                if (func == null) { errorMessage.append("No function at: " + functionAddrStr); return; }
-
-                int txId = program.startTransaction("Set function prototype");
-                try {
-                    DataTypeManager dtm = program.getDataTypeManager();
-                    FunctionSignatureParser parser = new FunctionSignatureParser(dtm, null);
-                    FunctionDefinitionDataType sig = parser.parse(null, prototype);
-                    if (sig == null) { errorMessage.append("Failed to parse prototype"); return; }
-
-                    ApplyFunctionSignatureCmd cmd = new ApplyFunctionSignatureCmd(
-                        addr, sig, SourceType.USER_DEFINED);
-                    if (cmd.applyTo(program, new ConsoleTaskMonitor())) {
-                        success.set(true);
-                    } else {
-                        errorMessage.append("Command failed: " + cmd.getStatusMsg());
-                    }
-                } catch (Exception e) {
-                    errorMessage.append("Error: " + e.getMessage());
-                } finally {
-                    program.endTransaction(txId, success.get());
-                }
-            });
-        } catch (Exception e) {
-            return result("Failed on Swing thread: " + e.getMessage());
-        }
-
-        return result(success.get() ?
-            "Successfully set function prototype: " + prototype :
-            "Failed: " + errorMessage.toString());
+        return new SetFunctionPrototypeTool(decompilerService).execute(arguments, program);
     }
 
     private Function findFunction(Program program, String name) {

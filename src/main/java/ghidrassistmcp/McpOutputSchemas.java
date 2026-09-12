@@ -16,6 +16,8 @@ public final class McpOutputSchemas {
         var text = Map.of("type", "string");
         var clipped = Map.of("type", "string", "maxLength", 2048);
         var nonnegative = Map.of("type", "integer", "minimum", 0);
+        properties.put("retained_result_bytes", nonnegative);
+        properties.put("result_retention_code", Map.of("type", "string", "enum", List.of("RESULT_EXPIRED", "RESULT_TOO_LARGE")));
         for (String key : List.of("task_id", "created_at", "started_at", "completed_at")) properties.put(key, text);
         for (String key : List.of("tool_name", "progress_message", "error_message")) properties.put(key, clipped);
         for (String key : List.of("state_version", "duration_ms")) properties.put(key, nonnegative);

@@ -128,6 +128,12 @@ public class StructTool implements McpTool {
     }
 
     @Override
+    public boolean isReadOnly(Map<String, Object> arguments) {
+        Object action = arguments == null ? null : arguments.get("action");
+        return action instanceof String && "field_xrefs".equalsIgnoreCase((String) action);
+    }
+
+    @Override
     public boolean isLongRunning() {
         // auto_create and field_xrefs actions require decompilation
         return true;

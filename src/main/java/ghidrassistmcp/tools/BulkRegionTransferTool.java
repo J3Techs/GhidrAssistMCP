@@ -7,6 +7,7 @@ package ghidrassistmcp.tools;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -21,9 +22,12 @@ import ghidra.program.model.listing.Program;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.symbol.SourceType;
-import ghidra.util.task.ConsoleTaskMonitor;
+import ghidra.util.task.TaskMonitor;
 import ghidrassistmcp.GhidrAssistMCPBackend;
+import ghidrassistmcp.ProgramIdentity;
 import ghidrassistmcp.McpTool;
+import ghidrassistmcp.tasks.McpTask;
+import ghidrassistmcp.tasks.McpTaskMonitor;
 import io.modelcontextprotocol.spec.McpSchema;
 
 /**
@@ -37,6 +41,8 @@ import io.modelcontextprotocol.spec.McpSchema;
  *   C. Report — structured output with match/mismatch/skip details
  */
 public class BulkRegionTransferTool implements McpTool {
+    @Override public boolean isLongRunning() { return true; }
+    @Override public boolean isReadOnly(Map<String,Object> args) { return Boolean.TRUE.equals(args.get("dry_run")); }
 
     private static final int OFFSET_SEARCH_RANGE = 0x8000;
     private static final int OFFSET_SAMPLE_COUNT = 10;
@@ -87,6 +93,8 @@ public class BulkRegionTransferTool implements McpTool {
                 "dry_run", Map.of("type", "boolean",
                     "description", "If true, report matches without applying labels (default false)",
                     "default", false),
+                "preview_token", Map.of("type", "string", "description", "Token returned by a reviewed dry_run; binds source/target identities and revisions"),
+                "name_policy", Map.of("type", "string", "enum", List.of("default_only", "replace"), "default", "default_only"),
                 "create_functions", Map.of("type", "boolean",
                     "description", "If true, create function definitions at target addresses when missing (default true)",
                     "default", true),
@@ -99,6 +107,32 @@ public class BulkRegionTransferTool implements McpTool {
     }
 
     @Override
+    public Map<String, Object> getOutputSchema() {
+        Map<String, Object> properties = new LinkedHashMap<>();
+        properties.put("source_program", Map.of("type", "string"));
+        properties.put("target_program", Map.of("type", "string"));
+        properties.put("preview_token", Map.of("type", "string"));
+        properties.put("dry_run", Map.of("type", "boolean"));
+        properties.put("committed", Map.of("type", "boolean"));
+        properties.put("matched", Map.of("type", "integer", "minimum", 0));
+        properties.put("functions_created", Map.of("type", "integer", "minimum", 0));
+        properties.put("labels_rolled_back", Map.of("type", "integer", "minimum", 0));
+        properties.put("functions_rolled_back", Map.of("type", "integer", "minimum", 0));
+        properties.put("failures", Map.of("type", "array", "items", Map.of("type", "string")));
+        properties.put("mismatches", Map.of("type", "array", "items", Map.of("type", "string")));
+        properties.put("details", Map.of("type", "array", "items", Map.of("type", "string")));
+        properties.put("fatal_error", Map.of("type", "string"));
+        properties.put("comparison_mode", Map.of("type", "string"));
+        properties.put("comparison_note", Map.of("type", "string"));
+        properties.put("source_language", Map.of("type", "string"));
+        properties.put("target_language", Map.of("type", "string"));
+        return MatcherContracts.objectSchema(properties, List.of(
+            "source_program", "target_program", "dry_run", "committed", "matched",
+            "functions_created", "labels_rolled_back", "functions_rolled_back",
+            "failures", "mismatches", "details", "fatal_error", "comparison_mode"));
+    }
+
+    @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
         return McpSchema.CallToolResult.builder()
             .addTextContent("This tool requires backend context for multi-program access.")
@@ -108,6 +142,12 @@ public class BulkRegionTransferTool implements McpTool {
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram,
                                              GhidrAssistMCPBackend backend) {
+        return execute(arguments, currentProgram, backend, null);
+    }
+
+    @Override
+    public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram,
+                                             GhidrAssistMCPBackend backend, McpTask task) {
         if (backend == null) {
             return McpSchema.CallToolResult.builder()
                 .addTextContent("Backend context not available")
@@ -115,26 +155,47 @@ public class BulkRegionTransferTool implements McpTool {
         }
 
         // --- Parse arguments ---
+        for (String key : List.of("source_program", "target_program", "start_address", "end_address")) {
+            if (!(arguments.get(key) instanceof String value) || value.isBlank())
+                return ProjectToolSupport.error(key + " must be a nonblank string");
+        }
+        for (String key : List.of("preview_token", "name_policy"))
+            if (arguments.containsKey(key) && !(arguments.get(key) instanceof String))
+                return ProjectToolSupport.error(key + " must be a string");
         String sourceProgramName = (String) arguments.get("source_program");
         String targetProgramName = (String) arguments.get("target_program");
         String startAddrStr = (String) arguments.get("start_address");
         String endAddrStr = (String) arguments.get("end_address");
+        String previewToken = arguments.get("preview_token") instanceof String s ? s.trim() : null;
+        String namePolicy = arguments.get("name_policy") instanceof String s ? s.trim().toLowerCase() : "default_only";
+        if (!namePolicy.equals("default_only") && !namePolicy.equals("replace")) return ProjectToolSupport.error("name_policy must be default_only or replace");
 
         boolean dryRun = false;
-        if (arguments.get("dry_run") instanceof Boolean)
-            dryRun = (Boolean) arguments.get("dry_run");
+        if (arguments.containsKey("dry_run") && !(arguments.get("dry_run") instanceof Boolean))
+            return ProjectToolSupport.error("dry_run must be a boolean");
+        if (arguments.get("dry_run") instanceof Boolean b) dryRun = b;
 
         boolean createFunctions = true;
-        if (arguments.get("create_functions") instanceof Boolean)
-            createFunctions = (Boolean) arguments.get("create_functions");
+        if (arguments.containsKey("create_functions") && !(arguments.get("create_functions") instanceof Boolean))
+            return ProjectToolSupport.error("create_functions must be a boolean");
+        if (arguments.get("create_functions") instanceof Boolean b) createFunctions = b;
 
         double sizeTolerance = 0.2;
-        if (arguments.get("size_tolerance") instanceof Number)
-            sizeTolerance = ((Number) arguments.get("size_tolerance")).doubleValue();
+        if (arguments.containsKey("size_tolerance") && !(arguments.get("size_tolerance") instanceof Number))
+            return ProjectToolSupport.error("size_tolerance must be a number");
+        if (arguments.get("size_tolerance") instanceof Number n) sizeTolerance = n.doubleValue();
+        if (!Double.isFinite(sizeTolerance) || sizeTolerance < 0 || sizeTolerance >= 1)
+            return ProjectToolSupport.error("size_tolerance must be finite and in [0,1)");
 
         Long codeOffset = null;
-        if (arguments.get("code_offset") instanceof Number)
-            codeOffset = ((Number) arguments.get("code_offset")).longValue();
+        if (arguments.containsKey("code_offset") && !(arguments.get("code_offset") instanceof Number))
+            return ProjectToolSupport.error("code_offset must be an integer");
+        if (arguments.get("code_offset") instanceof Number n) {
+            try { codeOffset = new java.math.BigDecimal(n.toString()).longValueExact(); }
+            catch (ArithmeticException | NumberFormatException e) { return ProjectToolSupport.error("code_offset must be an integer"); }
+        }
+
+        TaskMonitor monitor = task == null ? TaskMonitor.DUMMY : new McpTaskMonitor(task, 0, 100, "Bulk region transfer");
 
         // --- Resolve programs ---
         try (var sourceLease = ProgramSelection.lease(backend, sourceProgramName, currentProgram);
@@ -172,6 +233,20 @@ public class BulkRegionTransferTool implements McpTool {
                 .build();
         }
 
+        MatcherContracts.LanguageFacts sourceFacts = MatcherContracts.fromProgram(sourceProgram)
+            .withRangeContext(MatcherContracts.rangeVleContext(sourceProgram, startAddr, endAddr));
+        MatcherContracts.LanguageFacts targetFacts = MatcherContracts.fromProgram(targetProgram)
+            .withRangeContext(MatcherContracts.rangeVleContext(targetProgram, null, null));
+        MatcherContracts.RegionDecision comparison = MatcherContracts.regionCompare(sourceFacts, targetFacts);
+        if (!comparison.allowed() || comparison.mode() == MatcherContracts.RegionCompareMode.REJECTED) {
+            return ProjectToolSupport.error(comparison.message());
+        }
+        long sourceRevisionBeforeScan = sourceProgram.getModificationNumber();
+        long targetRevisionBeforeScan = targetProgram.getModificationNumber();
+        String planToken = planToken(sourceProgram, targetProgram, startAddrStr, endAddrStr, codeOffset, createFunctions, sizeTolerance, namePolicy);
+        if (previewToken != null && !previewToken.isBlank() && !previewToken.equalsIgnoreCase(planToken))
+            return ProjectToolSupport.error("Stale preview_token; re-run dry_run against the current source and target");
+
         // ========== PHASE A: Offset Detection ==========
         long detectedOffset;
         int sampleCount;
@@ -180,23 +255,41 @@ public class BulkRegionTransferTool implements McpTool {
             detectedOffset = codeOffset;
             sampleCount = -1; // user-provided
         } else {
-            OffsetResult offsetResult = detectOffset(sourceProgram, targetProgram, startAddr, endAddr);
+            OffsetResult offsetResult = detectOffset(sourceProgram, targetProgram, startAddr, endAddr,
+                sourceFacts, targetFacts, monitor);
             if (offsetResult.error != null) {
                 return McpSchema.CallToolResult.builder()
                     .addTextContent("Offset detection failed: " + offsetResult.error)
                     .build();
             }
+            if (sourceProgram.getModificationNumber() != sourceRevisionBeforeScan
+                    || targetProgram.getModificationNumber() != targetRevisionBeforeScan) {
+                return ProjectToolSupport.error("Source or target changed during offset detection; restart the transfer");
+            }
             detectedOffset = offsetResult.offset;
             sampleCount = offsetResult.agreementCount;
         }
 
-        // ========== PHASE B: Verified Transfer ==========
+        if (sourceProgram.getModificationNumber() != sourceRevisionBeforeScan || targetProgram.getModificationNumber() != targetRevisionBeforeScan)
+            return ProjectToolSupport.error("Source or target changed while planning; repeat preview");
+        // The same bounded representation validates the entire region before any apply.
         TransferResult transferResult = transferLabels(sourceProgram, targetProgram,
-            startAddr, endAddr, detectedOffset, dryRun, createFunctions, sizeTolerance);
+            startAddr, endAddr, detectedOffset, true, createFunctions, sizeTolerance,
+            sourceFacts, targetFacts, namePolicy, monitor);
+        if (!dryRun && transferResult.fatalError == null && transferResult.failures.isEmpty() && transferResult.mismatches.isEmpty()) {
+            if (sourceProgram.getModificationNumber() != sourceRevisionBeforeScan || targetProgram.getModificationNumber() != targetRevisionBeforeScan)
+                return ProjectToolSupport.error("Source or target changed during preview; repeat preview");
+            transferResult = transferLabels(sourceProgram, targetProgram, startAddr, endAddr, detectedOffset,
+                false, createFunctions, sizeTolerance, sourceFacts, targetFacts, namePolicy, monitor);
+        } else if (!dryRun) {
+            transferResult.matched = 0;
+            transferResult.fatalError = "Plan validation failed; no mutation started";
+        }
 
         // ========== PHASE C: Report ==========
         return buildReport(sourceProgramName, targetProgramName, startAddrStr, endAddrStr,
-            detectedOffset, sampleCount, dryRun, createFunctions, sizeTolerance, transferResult);
+            detectedOffset, sampleCount, dryRun, createFunctions, sizeTolerance, transferResult, comparison,
+            sourceFacts, targetFacts, planToken);
         } catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
     }
 
@@ -207,8 +300,17 @@ public class BulkRegionTransferTool implements McpTool {
      * and byte-matching their opcode patterns.
      */
     private OffsetResult detectOffset(Program sourceProgram, Program targetProgram,
-                                       Address startAddr, Address endAddr) {
+                                       Address startAddr, Address endAddr,
+                                       MatcherContracts.LanguageFacts sourceFacts,
+                                       MatcherContracts.LanguageFacts targetFacts,
+                                       TaskMonitor monitor) {
         OffsetResult result = new OffsetResult();
+        MatcherContracts.RegionDecision comparison = MatcherContracts.regionCompare(sourceFacts, targetFacts);
+        if (!comparison.allowed() || comparison.mode() == MatcherContracts.RegionCompareMode.REJECTED) {
+            result.error = comparison.message();
+            return result;
+        }
+        boolean vleMask = comparison.mode() == MatcherContracts.RegionCompareMode.POWERPC_VLE_OPCODE_MASK;
 
         // Collect candidate functions from source: named, >40 bytes
         List<Function> candidates = new ArrayList<>();
@@ -240,8 +342,7 @@ public class BulkRegionTransferTool implements McpTool {
             long srcOffset = srcEntry.getOffset();
             long srcSize = srcFunc.getBody().getNumAddresses();
 
-            // Read opcode pattern: first 4 instruction words (16 bytes)
-            // Mask: keep bytes 0,1 of each word (opcode), mask bytes 2,3 (operand)
+            // Read a 16-byte pattern. VLE uses the shared decoded operand mask; other languages compare exact bytes.
             int patternLen = OFFSET_PATTERN_WORDS * 4;
             byte[] pattern = new byte[patternLen];
             byte[] mask = new byte[patternLen];
@@ -249,11 +350,19 @@ public class BulkRegionTransferTool implements McpTool {
             try {
                 for (int i = 0; i < patternLen; i++) {
                     pattern[i] = srcMem.getByte(srcEntry.add(i));
-                    mask[i] = (i % 4 < 2) ? (byte) 0xFF : 0;
+                    mask[i] = (byte) 0xFF;
                 }
             } catch (MemoryAccessException e) {
                 sampleDetails.add(String.format("  SKIP %s: can't read source bytes", srcFunc.getName()));
                 continue;
+            }
+
+            if (vleMask) {
+                var qualified = InstructionMaskBuilder.plan(sourceProgram, srcEntry, patternLen, MatcherContracts.MaskMode.AUTO, monitor);
+                if (!qualified.sound() || qualified.mask() == null) {
+                    sampleDetails.add("SKIP " + srcFunc.getName() + ": " + qualified.explanation()); continue;
+                }
+                mask = qualified.mask();
             }
 
             // Search target within +/- OFFSET_SEARCH_RANGE of source address
@@ -274,7 +383,7 @@ public class BulkRegionTransferTool implements McpTool {
 
             boolean foundMatch = false;
             try {
-                Address matchAddr = tgtMem.findBytes(searchStart, searchEnd, pattern, mask, true, null);
+                Address matchAddr = tgtMem.findBytes(searchStart, searchEnd, pattern, mask, true, monitor);
                 while (matchAddr != null && !foundMatch) {
                     // Check if this is a function entry point
                     Function tgtFunc = tgtFuncMgr.getFunctionAt(matchAddr);
@@ -283,7 +392,7 @@ public class BulkRegionTransferTool implements McpTool {
                         long tgtSize = tgtFunc.getBody().getNumAddresses();
                         double sizeRatio = Math.min(srcSize, tgtSize) /
                                            (double) Math.max(srcSize, tgtSize);
-                        if (sizeRatio > 0.5) {
+                        if (sizeRatio > 0.5 && (!vleMask || compatibleInstructionMask(targetProgram, matchAddr, patternLen, mask, monitor))) {
                             long offset = matchAddr.getOffset() - srcOffset;
                             offsets.add(offset);
                             sampleDetails.add(String.format("  MATCH %s: src=0x%08x tgt=0x%08x offset=%+d (size %d vs %d)",
@@ -292,7 +401,7 @@ public class BulkRegionTransferTool implements McpTool {
                         }
                     }
                     if (!foundMatch) {
-                        matchAddr = tgtMem.findBytes(matchAddr.add(1), searchEnd, pattern, mask, true, null);
+                        matchAddr = tgtMem.findBytes(matchAddr.add(1), searchEnd, pattern, mask, true, monitor);
                     }
                 }
             } catch (Exception e) {
@@ -352,8 +461,17 @@ public class BulkRegionTransferTool implements McpTool {
     private TransferResult transferLabels(Program sourceProgram, Program targetProgram,
                                            Address startAddr, Address endAddr, long offset,
                                            boolean dryRun, boolean createFunctions,
-                                           double sizeTolerance) {
+                                           double sizeTolerance,
+                                           MatcherContracts.LanguageFacts sourceFacts,
+                                           MatcherContracts.LanguageFacts targetFacts,
+                                           String namePolicy,
+                                           TaskMonitor monitor) {
         TransferResult result = new TransferResult();
+        MatcherContracts.RegionDecision comparison = MatcherContracts.regionCompare(sourceFacts, targetFacts);
+        if (!comparison.allowed() || comparison.mode() == MatcherContracts.RegionCompareMode.REJECTED) {
+            result.fatalError = comparison.message();
+            return result;
+        }
 
         if (!dryRun && targetProgram.getCurrentTransactionInfo() != null) {
             result.fatalError = "Target has an active transaction; retry after it finishes";
@@ -364,11 +482,25 @@ public class BulkRegionTransferTool implements McpTool {
         Memory tgtMem = targetProgram.getMemory();
         AddressSpace tgtAddrSpace = targetProgram.getAddressFactory().getDefaultAddressSpace();
         FunctionManager tgtFuncMgr = targetProgram.getFunctionManager();
-        ConsoleTaskMonitor monitor = new ConsoleTaskMonitor();
 
         int txId = -1;
+        long sourceRevision = sourceProgram.getModificationNumber();
+        long targetRevision = targetProgram.getModificationNumber();
+        String transactionName = "MCP region transfer " + java.util.UUID.randomUUID();
         if (!dryRun) {
-            txId = targetProgram.startTransaction("Bulk Region Transfer");
+            if (!targetProgram.isChangeable()) { result.fatalError = "Target is not changeable"; return result; }
+            txId = targetProgram.startTransaction(transactionName);
+            var info = targetProgram.getCurrentTransactionInfo();
+            if (info != null && info.getOpenSubTransactions().stream().anyMatch(d -> !TransferPlanSupport.ownTransactionDescription(d, transactionName))) {
+                targetProgram.endTransaction(txId, true);
+                result.fatalError = "Foreign target transaction started; retry preview";
+                return result;
+            }
+            if (targetProgram.getModificationNumber() != targetRevision || sourceProgram.getModificationNumber() != sourceRevision) {
+                targetProgram.endTransaction(txId, false);
+                result.fatalError = "Program changed before region transaction";
+                return result;
+            }
         }
 
         try {
@@ -383,6 +515,9 @@ public class BulkRegionTransferTool implements McpTool {
                 Function srcFunc = funcIter.next();
                 if (srcFunc.getEntryPoint().compareTo(endAddr) > 0) break;
                 result.totalSourceFunctions++;
+                if (result.totalSourceFunctions > TransferPlanSupport.MAX_TRANSFERS) {
+                    result.fatalError = "Region exceeds 500 functions; narrow the address range"; break;
+                }
 
                 // Skip unnamed functions
                 if (!isNamedFunction(srcFunc)) {
@@ -396,7 +531,9 @@ public class BulkRegionTransferTool implements McpTool {
                 long srcSize = srcFunc.getBody().getNumAddresses();
 
                 // Compute expected target address
-                long tgtOffset = srcOffset + offset;
+                long tgtOffset;
+                try { tgtOffset = Math.addExact(srcOffset, offset); }
+                catch (ArithmeticException e) { result.fatalError = "Target address offset overflows"; break; }
                 Address tgtAddr;
                 try {
                     tgtAddr = tgtAddrSpace.getAddress(tgtOffset);
@@ -449,6 +586,12 @@ public class BulkRegionTransferTool implements McpTool {
                     consecutiveMismatches = 0;
                     continue;
                 }
+                if ("default_only".equals(namePolicy)
+                        && tgtFunc.getSymbol().getSource() != SourceType.DEFAULT) {
+                    result.skippedAlreadyNamed++;
+                    consecutiveMismatches = 0;
+                    continue;
+                }
 
                 // Size verification
                 long tgtSize = tgtFunc.getBody().getNumAddresses();
@@ -463,15 +606,19 @@ public class BulkRegionTransferTool implements McpTool {
                     continue;
                 }
 
-                // Opcode verification
+                // Opcode verification — re-run the architecture guard; never apply VLE masks otherwise.
                 int compareBytes = (int) Math.min(Math.min(srcSize, tgtSize), VERIFY_MAX_BYTES);
-                compareBytes = (compareBytes / 4) * 4; // round down to word boundary
-                if (compareBytes >= 4) {
-                    double opcodeMatch = computeOpcodeMatch(srcMem, srcEntry, tgtMem, tgtAddr, compareBytes);
-                    if (opcodeMatch < OPCODE_MATCH_THRESHOLD) {
+                if (comparison.mode() == MatcherContracts.RegionCompareMode.POWERPC_VLE_OPCODE_MASK) {
+                    compareBytes = (compareBytes / 4) * 4;
+                }
+                if (compareBytes >= 1 && (comparison.mode() != MatcherContracts.RegionCompareMode.POWERPC_VLE_OPCODE_MASK || compareBytes >= 4)) {
+                    double opcodeMatch = computeOpcodeMatch(srcMem, srcEntry, tgtMem, tgtAddr, compareBytes,
+                        sourceFacts, targetFacts);
+                    double requiredMatch = comparison.mode() == MatcherContracts.RegionCompareMode.POWERPC_VLE_OPCODE_MASK ? OPCODE_MATCH_THRESHOLD : 1.0;
+                    if (opcodeMatch < requiredMatch) {
                         result.addMismatch(srcName, srcEntry, String.format(
-                            "opcode mismatch: %.0f%% match (threshold=%.0f%%), compared %d bytes",
-                            opcodeMatch * 100, OPCODE_MATCH_THRESHOLD * 100, compareBytes));
+                            "opcode mismatch: %.0f%% match (threshold=%.0f%%), compared %d bytes (%s)",
+                            opcodeMatch * 100, OPCODE_MATCH_THRESHOLD * 100, compareBytes, comparison.mode().name()));
                         consecutiveMismatches++;
                         checkConsecutiveMismatches(result, consecutiveMismatches, offset);
                         continue;
@@ -499,6 +646,8 @@ public class BulkRegionTransferTool implements McpTool {
 
             if (!dryRun && txId >= 0) {
                 if (Thread.currentThread().isInterrupted() || monitor.isCancelled()) result.fatalError = "Transfer cancelled";
+                if (sourceProgram != targetProgram && sourceProgram.getModificationNumber() != sourceRevision)
+                    result.fatalError = "Source changed during transfer";
                 boolean commit = result.failures.isEmpty() && result.mismatches.isEmpty() && result.fatalError == null;
                 targetProgram.endTransaction(txId, commit);
                 txId = -1;
@@ -518,37 +667,47 @@ public class BulkRegionTransferTool implements McpTool {
     }
 
     /**
-     * Compare opcode bytes (first 2 bytes of each 4-byte instruction word) between
-     * source and target at the given addresses.
+     * Compare bytes between source and target. PowerPC VLE uses a decoded instruction operand
+     * mask only after {@link MatcherContracts#regionCompare} qualifies both programs.
+     * Matching non-VLE languages compare exact bytes. This method never applies VLE
+     * masks when the guard rejects or selects exact-byte mode.
      */
     private double computeOpcodeMatch(Memory srcMem, Address srcAddr,
-                                       Memory tgtMem, Address tgtAddr, int numBytes) {
-        int matched = 0;
-        int total = 0;
-
-        for (int i = 0; i + 1 < numBytes; i += 4) {
-            try {
-                byte srcOp0 = srcMem.getByte(srcAddr.add(i));
-                byte srcOp1 = srcMem.getByte(srcAddr.add(i + 1));
-                byte tgtOp0 = tgtMem.getByte(tgtAddr.add(i));
-                byte tgtOp1 = tgtMem.getByte(tgtAddr.add(i + 1));
-
-                if (srcOp0 == tgtOp0 && srcOp1 == tgtOp1) matched++;
-                total++;
-            } catch (MemoryAccessException e) {
-                // Stop comparing at memory boundary
-                break;
-            }
+                                       Memory tgtMem, Address tgtAddr, int numBytes,
+                                       MatcherContracts.LanguageFacts sourceFacts,
+                                       MatcherContracts.LanguageFacts targetFacts) {
+        MatcherContracts.RegionDecision comparison = MatcherContracts.regionCompare(sourceFacts, targetFacts);
+        if (!comparison.allowed() || comparison.mode() == MatcherContracts.RegionCompareMode.REJECTED) {
+            throw new IllegalStateException("Region opcode compare invoked without architecture qualification: "
+                + comparison.message());
         }
 
-        if (total == 0) return 0.0;
-        return (double) matched / total;
+        try {
+            byte[] mask = new byte[numBytes]; java.util.Arrays.fill(mask, (byte)0xff);
+            if (comparison.mode() == MatcherContracts.RegionCompareMode.POWERPC_VLE_OPCODE_MASK) {
+                var qualified = InstructionMaskBuilder.plan(srcMem.getProgram(), srcAddr, numBytes,
+                    MatcherContracts.MaskMode.AUTO, TaskMonitor.DUMMY);
+                if (!qualified.sound() || qualified.mask() == null) return 0;
+                mask = qualified.mask();
+                if (!compatibleInstructionMask(tgtMem.getProgram(), tgtAddr, numBytes, mask, TaskMonitor.DUMMY)) return 0;
+            }
+            for (int i = 0; i < numBytes; i++) {
+                if (Thread.currentThread().isInterrupted()) return 0;
+                if ((srcMem.getByte(srcAddr.add(i)) & mask[i]) != (tgtMem.getByte(tgtAddr.add(i)) & mask[i])) return 0;
+            }
+            return numBytes > 0 ? 1.0 : 0;
+        } catch (Exception e) { return 0; }
+    }
+
+    private static boolean compatibleInstructionMask(Program program, Address address, int length, byte[] expected, TaskMonitor monitor) {
+        var qualified = InstructionMaskBuilder.plan(program, address, length, MatcherContracts.MaskMode.AUTO, monitor);
+        return qualified.sound() && java.util.Arrays.equals(expected, qualified.mask());
     }
 
     /**
      * Create a function at the given address by disassembling first, then creating.
      */
-    private Function createFunctionAt(Program program, Address addr, ConsoleTaskMonitor monitor) {
+    private Function createFunctionAt(Program program, Address addr, TaskMonitor monitor) {
         // Disassemble bytes
         DisassembleCommand disCmd = new DisassembleCommand(addr, null, true);
         disCmd.applyTo(program, monitor);
@@ -586,13 +745,18 @@ public class BulkRegionTransferTool implements McpTool {
                                                    String startAddr, String endAddr,
                                                    long offset, int sampleCount,
                                                    boolean dryRun, boolean createFunctions,
-                                                   double sizeTolerance, TransferResult tr) {
+                                                   double sizeTolerance, TransferResult tr,
+                                                   MatcherContracts.RegionDecision comparison,
+                                                   MatcherContracts.LanguageFacts sourceFacts,
+                                                   MatcherContracts.LanguageFacts targetFacts,
+                                                   String planToken) {
         StringBuilder report = new StringBuilder();
         report.append("Bulk Region Transfer Report\n");
         report.append("===========================\n");
         report.append("Source: ").append(sourceName).append("\n");
         report.append("Target: ").append(targetName).append("\n");
         report.append("Range: ").append(startAddr).append(" — ").append(endAddr).append("\n");
+        report.append("Comparison: ").append(comparison.mode().name()).append(" — ").append(comparison.message()).append("\n");
         if (dryRun) report.append("MODE: DRY RUN (no changes applied)\n");
         report.append("\n");
 
@@ -651,16 +815,41 @@ public class BulkRegionTransferTool implements McpTool {
             report.append("FATAL ERROR: ").append(tr.fatalError).append("\n");
         }
 
-        return McpSchema.CallToolResult.builder().isError(tr.fatalError != null || !dryRun && !tr.committed)
-            .structuredContent(Map.ofEntries(
-                Map.entry("source_program", sourceName), Map.entry("target_program", targetName),
-                Map.entry("dry_run", dryRun), Map.entry("committed", tr.committed),
-                Map.entry("matched", tr.matched), Map.entry("functions_created", tr.functionsCreated),
-                Map.entry("labels_rolled_back", tr.labelsRolledBack), Map.entry("functions_rolled_back", tr.functionsRolledBack),
-                Map.entry("failures", tr.failures), Map.entry("mismatches", tr.mismatches),
-                Map.entry("details", tr.details), Map.entry("fatal_error", tr.fatalError == null ? "" : tr.fatalError)))
-            .addTextContent(report.toString())
-            .build();
+        Map<String, Object> structured = new LinkedHashMap<>();
+        structured.put("source_program", sourceName);
+        structured.put("target_program", targetName);
+        structured.put("preview_token", planToken);
+        structured.put("dry_run", dryRun);
+        structured.put("committed", tr.committed);
+        structured.put("matched", tr.matched);
+        structured.put("would_commit", dryRun ? tr.matched : 0);
+        structured.put("labels_committed", tr.committed ? tr.matched : 0);
+        structured.put("preserved_or_unchanged", tr.skippedAlreadyNamed);
+        structured.put("source_unnamed", tr.skippedUnnamed);
+        structured.put("functions_created", tr.functionsCreated);
+        structured.put("labels_rolled_back", tr.labelsRolledBack);
+        structured.put("functions_rolled_back", tr.functionsRolledBack);
+        structured.put("failures", tr.failures);
+        structured.put("mismatches", tr.mismatches);
+        structured.put("details", tr.details);
+        structured.put("fatal_error", tr.fatalError == null ? "" : tr.fatalError);
+        structured.put("comparison_mode", comparison.mode().name().toLowerCase());
+        structured.put("comparison_note", comparison.message());
+        structured.put("source_language", sourceFacts.languageId());
+        structured.put("target_language", targetFacts.languageId());
+        return ProjectToolSupport.result(structured, tr.fatalError != null || !tr.failures.isEmpty() || !tr.mismatches.isEmpty() || !dryRun && !tr.committed);
+    }
+
+    private String planToken(Program source, Program target, String start, String end, Long offset,
+            boolean createFunctions, double tolerance, String namePolicy) {
+        try {
+            String value = String.join("|", "bulk_region_transfer", ProgramIdentity.id(source),
+                ProgramIdentity.id(target), Integer.toUnsignedString(System.identityHashCode(source)), Integer.toUnsignedString(System.identityHashCode(target)), Long.toString(source.getModificationNumber()),
+                Long.toString(target.getModificationNumber()), start, end,
+                String.valueOf(offset), Boolean.toString(createFunctions), Double.toString(tolerance), namePolicy);
+            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                .digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (Exception e) { throw new IllegalStateException("Unable to fingerprint region transfer plan", e); }
     }
 
     // ==================== Helpers ====================

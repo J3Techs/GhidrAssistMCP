@@ -18,12 +18,15 @@ public final class WaitTaskTool implements McpTool {
     @Override public String getDescription() {
         return "Wait up to 30 seconds for a custom async task to finish, or for state_version to advance " +
             "when after_version is supplied. Timeout or interruption ends only this wait; the operation continues. " +
-            "Returns bounded structured metadata; use get_task_status for the retained result. " +
+            "Returns bounded metadata; include_result=true also returns a complete terminal operation_result when it fits max_result_bytes. " +
+            "Use get_task_status for an omitted retained result. " +
             "Task IDs and version cursors are in-memory and scoped to manager_instance_id. This is not the negotiated MCP Tasks extension.";
     }
     @Override public McpSchema.JsonSchema getInputSchema() {
         return new McpSchema.JsonSchema("object", Map.of(
             "task_id", Map.of("type", "string", "minLength", 1),
+            "include_result", Map.of("type", "boolean", "default", false),
+            "max_result_bytes", Map.of("type", "integer", "minimum", 1024, "maximum", 1048576, "default", 65536),
             "timeout_ms", Map.of("type", "integer", "minimum", 0, "maximum", 30000, "default", 25000),
             "after_version", Map.of("type", "integer", "minimum", 0,
                 "description", "Previously observed state_version for this task. Omit to wait for terminal state.")),
@@ -40,6 +43,11 @@ public final class WaitTaskTool implements McpTool {
             if (!(arguments.get("task_id") instanceof String id) || id.isBlank())
                 return TaskResultSchemas.error("INVALID_ARGUMENT", "task_id must be a nonblank string", false);
             long timeout = integer(arguments, "timeout_ms", 25000);
+            if (arguments.containsKey("include_result") && !(arguments.get("include_result") instanceof Boolean))
+                throw new IllegalArgumentException("include_result must be a boolean");
+            long resultBudget = integer(arguments, "max_result_bytes", 65536);
+            if (resultBudget < 1024 || resultBudget > 1048576)
+                throw new IllegalArgumentException("max_result_bytes must be between 1024 and 1048576");
             Long afterVersion = arguments.containsKey("after_version") ? integer(arguments, "after_version", 0) : null;
             if (timeout < 0 || timeout > 30000) throw new IllegalArgumentException("timeout_ms must be between 0 and 30000");
             if (backend == null || backend.getTaskManager() == null)
@@ -47,6 +55,8 @@ public final class WaitTaskTool implements McpTool {
             if (backend.getTaskManager().getTask(id) == null)
                 return TaskResultSchemas.error("TASK_NOT_FOUND", "Task not found: " + id, false);
             Map<String, Object> snapshot = waitWithProgress(backend.getTaskManager(), id, timeout, afterVersion);
+            if (Boolean.TRUE.equals(arguments.get("include_result")))
+                TaskResultSchemas.includeResult(snapshot, backend.getTaskManager().getTask(id), (int) resultBudget);
             return TaskResultSchemas.success("Task " + id + ": " + snapshot.get("status") + "; wait " + snapshot.get("wait_outcome") +
                     "; version " + snapshot.get("state_version") + ". Use get_task_status to retrieve a terminal result.", snapshot);
         } catch (IllegalArgumentException e) {

@@ -3,6 +3,9 @@ package ghidrassistmcp.tools;
 /** Bounds text while it is built and always labels omitted evidence. */
 final class BoundedQueryText {
     static final int MAX_CHARS = 200_000;
+    // Leave room for JSON escaping (up to six bytes per UTF-16 code unit) under
+    // the 128 KiB client response budget used by the integration examples.
+    static final int PAGE_CHARS = 20_000;
     private static final String NOTICE = "\n[TRUNCATED: query output budget reached; narrow the query or request another page.]\n";
     private final StringBuilder text = new StringBuilder();
     private final int maximum;

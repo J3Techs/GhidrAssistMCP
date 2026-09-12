@@ -94,7 +94,7 @@ public class SearchSymbolsBatchTool implements McpTool {
                 "truncated",
                 ms.size() >= lim || scanTruncated));
       }
-      return ProjectToolSupport.result(
+      return BatchQuerySupport.boundedResult(
           Map.of("results", outRows, "count", outRows.size(), "truncated", trunc));
     } catch (Exception e) {
       return ProjectToolSupport.error(e.getMessage());

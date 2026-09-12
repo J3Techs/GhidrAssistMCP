@@ -16,8 +16,34 @@ final class TaskResultSchemas {
 
     static Map<String, Object> waitSchema() {
         return withErrors(extend(McpOutputSchemas.taskSubmission(), Map.of(
-            "wait_outcome", Map.of("type", "string", "enum", List.of("terminal", "changed", "timeout"))),
+            "wait_outcome", Map.of("type", "string", "enum", List.of("terminal", "changed", "timeout")),
+            "result_status", Map.of("type", "string", "enum", List.of("included", "not_ready", "unavailable", "too_large")),
+            "result_bytes", Map.of("type", "integer", "minimum", 0),
+            "operation_result", Map.of("type", "object")),
             List.of("wait_outcome")));
+    }
+
+    /** Include a complete operation result, or explicit omission metadata; never slice JSON. */
+    static void includeResult(Map<String, Object> snapshot, ghidrassistmcp.tasks.McpTask task, int budget) {
+        if (!Boolean.TRUE.equals(snapshot.get("terminal"))) {
+            snapshot.put("result_status", "not_ready"); return;
+        }
+        var payload = task == null ? null : task.getResult();
+        if (payload == null) { snapshot.put("result_status", "unavailable"); return; }
+        try {
+            Map<String, Object> value = JSON.convertValue(payload, new com.fasterxml.jackson.core.type.TypeReference<Map<String,Object>>() {});
+            long size = JSON.writeValueAsBytes(value).length;
+            snapshot.put("result_bytes", size);
+            snapshot.put("result_status", "included");
+            snapshot.put("operation_result", value);
+            // Account for the outer structured body and its JSON text fallback including escaping.
+            var candidate = success("Task result included.", snapshot);
+            if (JSON.writeValueAsBytes(candidate).length + 1024 > budget) {
+                snapshot.remove("operation_result"); snapshot.put("result_status", "too_large");
+            }
+        } catch (RuntimeException | JsonProcessingException error) {
+            snapshot.remove("operation_result"); snapshot.put("result_status", "unavailable");
+        }
     }
 
     static Map<String, Object> cancelSchema() {

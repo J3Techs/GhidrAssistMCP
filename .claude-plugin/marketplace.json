@@ -1,0 +1,5 @@
+{
+  "name": "ghidrassist-marketplace",
+  "owner": {"name": "GhidrAssistMCP"},
+  "plugins": [{"name": "ghidrassist", "source": "./claude-code-integration"}]
+}

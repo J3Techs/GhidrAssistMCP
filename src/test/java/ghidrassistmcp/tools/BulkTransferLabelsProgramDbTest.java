@@ -54,27 +54,26 @@ class BulkTransferLabelsProgramDbTest {
             var r = new BulkTransferLabelsTool().execute(Map.of(
                 "target_program", "fixture", "transfers", List.of(Map.of("target_addr", "0x1000", "name", "new_name", "comment", "evidence", "bookmarks", List.of(Map.of("category", "Test", "comment", "mark"))))), p, null);
             assertFalse(r.isError(), () -> r.content().toString());
-            // Legacy name transfer remains backward-compatible; new annotation
-            // fields are preview-only by default.
-            assertEquals("new_name", f.getName());
+            // Analyst names are preserved by default; optional annotations remain previews.
+            assertEquals("old_name", f.getName());
             assertNull(f.getComment());
             assertEquals(0, p.getBookmarkManager().getBookmarks(f.getEntryPoint()).length);
         } finally { p.release(CONSUMER); }
     }
 
-    @Test void explicitApplyReplacesAnnotationAndInvalidLaterRowRollsBack() throws Exception {
+    @Test void invalidLaterRowRejectsEntirePlanBeforeApplyingEdits() throws Exception {
         Program p = program();
         try {
             Function f = p.getFunctionManager().getFunctionAt(p.getAddressFactory().getAddress("0x1000"));
             int tx = p.startTransaction("seed"); f.setComment("old"); p.endTransaction(tx, true);
             var r = new BulkTransferLabelsTool().execute(Map.of(
-                "target_program", "fixture", "preview_annotations", false, "conflict_policy", "replace",
+                "target_program", "fixture", "preview_annotations", false, "conflict_policy", "replace", "name_policy", "replace",
                 "transfers", List.of(
                     Map.of("target_addr", "0x1000", "name", "new_name", "comment", "new"),
                     Map.of("target_addr", "0x9999", "name", "bad", "comment", "must rollback"))), p, null);
             assertTrue(r.isError());
-            assertEquals("old_name", f.getName(), "transaction rollback must restore legacy name too");
-            assertEquals("old", f.getComment(), "transaction rollback must restore annotation");
+            assertEquals("old_name", f.getName(), "invalid plan must not apply the requested name replacement");
+            assertEquals("old", f.getComment(), "invalid plan must not apply annotations");
         } finally { p.release(CONSUMER); }
     }
 
@@ -84,7 +83,7 @@ class BulkTransferLabelsProgramDbTest {
             Function f = p.getFunctionManager().getFunctionAt(p.getAddressFactory().getAddress("0x1000"));
             int tx = p.startTransaction("seed"); f.setComment("existing"); p.endTransaction(tx, true);
             var r = new BulkTransferLabelsTool().execute(Map.of(
-                "target_program", "fixture", "preview_annotations", false, "conflict_policy", "preserve",
+                "target_program", "fixture", "preview_annotations", false, "conflict_policy", "preserve", "name_policy", "replace",
                 "transfers", List.of(Map.of("target_addr", "0x1000", "name", "new_name", "comment", "incoming"))), p, null);
             assertFalse(r.isError(), () -> r.content().toString());
             assertEquals("new_name", f.getName());

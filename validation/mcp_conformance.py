@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Small read-only MCP HTTP conformance probe (stdlib only)."""
+import argparse, json, pathlib, time, urllib.request, urllib.error
+
+class Client:
+    def __init__(self, endpoint): self.endpoint, self.sid, self.i = endpoint, None, 0
+    def call(self, method, params=None):
+        self.i += 1; body = {"jsonrpc":"2.0", "id":self.i, "method":method}
+        if params is not None: body["params"] = params
+        raw = json.dumps(body, ensure_ascii=False).encode(); headers={"Content-Type":"application/json","Accept":"application/json, text/event-stream"}
+        if self.sid: headers["Mcp-Session-Id"] = self.sid
+        headers["MCP-Protocol-Version"] = "2025-11-25"
+        started=time.perf_counter()
+        req=urllib.request.Request(self.endpoint, data=raw, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as res:
+                data=res.read(); self.sid=res.headers.get("Mcp-Session-Id", self.sid); ctype=res.headers.get("Content-Type","")
+        except Exception as e: return {"method":method,"ok":False,"error":str(e),"elapsed_ms":(time.perf_counter()-started)*1000,"request_bytes":len(raw),"response_bytes":0}
+        parsed=self.parse(data, ctype); obj=next((item for item in parsed if isinstance(item,dict) and item.get("id")==self.i), None)
+        nested_error=isinstance(obj,dict) and ("error" in obj or isinstance(obj.get("result"),dict) and obj["result"].get("isError") is True)
+        return {"method":method,"ok":isinstance(obj,dict) and not nested_error,"elapsed_ms":(time.perf_counter()-started)*1000,"request_bytes":len(raw),"response_bytes":len(data),"response":obj}
+    def notify(self, method, params=None):
+        body={"jsonrpc":"2.0","method":method};
+        if params is not None: body["params"]=params
+        headers={"Content-Type":"application/json","Accept":"application/json, text/event-stream"}
+        if self.sid: headers["Mcp-Session-Id"]=self.sid
+        headers["MCP-Protocol-Version"]="2025-11-25"
+        req=urllib.request.Request(self.endpoint,data=json.dumps(body).encode(),headers=headers,method="POST")
+        try:
+            with urllib.request.urlopen(req,timeout=30) as res: res.read()
+        except Exception as e: return {"ok":False,"error":str(e)}
+        return {"ok":True}
+    @staticmethod
+    def parse(data, ctype):
+        text=data.decode("utf-8","replace")
+        if "json" in ctype and not "event-stream" in ctype:
+            try: return [json.loads(text)]
+            except Exception: return []
+        out=[]
+        for line in text.splitlines():
+            if line.startswith("data:"):
+                try: out.append(json.loads(line[5:].strip()))
+                except Exception: pass
+        if not out:
+            try: out=[json.loads(text)]
+            except Exception: pass
+        return out
+
+def main():
+    ap=argparse.ArgumentParser(); ap.add_argument("--endpoint",required=True); ap.add_argument("--output",required=True); ap.add_argument("--fixture-ready")
+    a=ap.parse_args(); checks=[]; started=time.time(); fixture=None
+    if a.fixture_ready:
+        p=pathlib.Path(a.fixture_ready).resolve(); roots=[pathlib.Path.cwd().resolve()/"build"/"upgrade-validation", pathlib.Path.cwd().resolve()/"build"]
+        try:
+            if not any(p.is_relative_to(r) for r in roots): raise ValueError("fixture path outside disposable build roots")
+            fixture=json.loads(p.read_text(encoding="utf-8"))
+            if fixture.get("endpoint") != a.endpoint: raise ValueError("endpoint differs from fixture ready file")
+            checks.append({"name":"fixture_guard","ok":True,"path":str(p)})
+        except Exception as e: checks.append({"name":"fixture_guard","ok":False,"error":str(e)})
+    c=Client(a.endpoint)
+    init=c.call("initialize",{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"mcp-conformance","version":"1"}}); checks.append({"name":"initialize","result":init,"ok":init["ok"]})
+    if init["ok"]:
+        notification=c.notify("notifications/initialized"); checks.append({"name":"initialized_notification",**notification})
+        for name, params in [("tools/list",{}),("tools/call",{"name":"runtime_capabilities","arguments":{"include_programs":False}}),("tools/call",{"name":"list_binaries","arguments":{"limit":8,"offset":0}})]:
+            r=c.call(name,params); checks.append({"name":name,"result":r,"ok":r["ok"]})
+        tools=next((c["result"].get("response",{}).get("result",{}).get("tools",[]) for c in checks if c["name"]=="tools/list" and c["ok"]),[])
+        if any(t.get("name")=="search_functions_by_name" for t in tools):
+            probe=c.call("tools/call",{"name":"search_functions_by_name","arguments":{"search_term":"x","limit":1}}); checks.append({"name":"bounded_search","result":probe,"ok":probe["ok"]})
+        resource_list=c.call("resources/list",{}); checks.append({"name":"resources/list","result":resource_list,"ok":resource_list["ok"]})
+        resources=resource_list.get("response",{}).get("result",{}).get("resources",[]) if resource_list["ok"] else []
+        if resources:
+            uri=resources[0].get("uri"); rr=c.call("resources/read",{"uri":uri}); checks.append({"name":"resources/read","result":rr,"ok":rr["ok"]})
+        missing=c.call("tools/call",{"name":"get_binary_info","arguments":{"program_id":"missing-program-id"}}); checks.append({"name":"missing_selector","result":missing,"ok":not missing["ok"] and "missing-program-id" in json.dumps(missing.get("response",{}))})
+        exact=None
+        programs=next((c["result"].get("response",{}).get("result",{}).get("structuredContent",{}).get("programs",[]) for c in checks if c["name"]=="tools/call" and c["result"].get("response",{}).get("result",{}).get("structuredContent",{}).get("programs") is not None),[])
+        if programs and fixture:
+            exact=c.call("tools/call",{"name":"get_code","arguments":{"program_id":programs[0]["program_id"],"function":"1000","format":"disassembly","max_items":20}})
+            checks.append({"name":"exact_get_code","result":exact,"ok":exact["ok"]})
+        wait=c.call("tools/call",{"name":"get_task_status","arguments":{"task_id":"missing-task"}}); checks.append({"name":"task_status_error","result":wait,"ok":not wait["ok"] and isinstance(wait.get("response",{}).get("result"),dict) and wait["response"]["result"].get("isError") is True})
+    report={"schema_version":1,"source":"validation/mcp_conformance.py","fixture":fixture is not None,"endpoint":a.endpoint,"started_at":started,"checks":checks,"passed":all(x.get("ok",True) for x in checks)}
+    out=pathlib.Path(a.output); out.parent.mkdir(parents=True,exist_ok=True); out.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8"); print(json.dumps({"passed":report["passed"],"output":str(out)}))
+    return 0 if report["passed"] else 1
+if __name__=="__main__": raise SystemExit(main())

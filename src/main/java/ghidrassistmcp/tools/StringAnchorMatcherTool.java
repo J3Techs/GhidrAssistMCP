@@ -4,7 +4,7 @@
 package ghidrassistmcp.tools;
 
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -14,14 +14,19 @@ import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceManager;
+import ghidra.util.exception.CancelledException;
+import ghidra.util.task.TaskMonitor;
 import ghidrassistmcp.GhidrAssistMCPBackend;
 import ghidrassistmcp.McpTool;
+import ghidrassistmcp.tasks.McpTask;
+import ghidrassistmcp.tasks.McpTaskMonitor;
 import io.modelcontextprotocol.spec.McpSchema;
 
 /**
- * Matches functions between two open programs by finding shared unique string references.
- * A string that appears exactly once in each program and is referenced by exactly one
- * function in each provides a high-confidence function match.
+ * Matches functions between two open programs by shared string references.
+ * A string is a unique anchor only when it occurs once and is referenced by
+ * exactly one function on each side. Duplicate string data items are counted
+ * as separate occurrences and cannot claim uniqueness.
  */
 public class StringAnchorMatcherTool implements McpTool {
 
@@ -32,10 +37,10 @@ public class StringAnchorMatcherTool implements McpTool {
 
     @Override
     public String getDescription() {
-        return "Match functions between two programs by shared unique string references. " +
-               "Finds strings that exist in both programs and are referenced by exactly one function " +
-               "in each, providing high-confidence function matches. " +
-               "Returns matched function pairs with the anchor strings.";
+        return "Match functions between two programs by shared string references. "
+            + "A 1-function reference is not uniqueness if the string value appears more than once. "
+            + "Returns structured JSON with full anchor text plus a separate preview; a result cap "
+            + "or truncated scan cannot establish uniqueness.";
     }
 
     @Override
@@ -54,10 +59,58 @@ public class StringAnchorMatcherTool implements McpTool {
             Map.of(
                 "source_program", Map.of("type", "string", "description", "Exact source name, project path, URL or program_id; ambiguous names fail"),
                 "target_program", Map.of("type", "string", "description", "Exact target name, project path, URL or program_id; ambiguous names fail"),
-                "min_string_length", Map.of("type", "integer", "description", "Minimum string length to consider (default 6)", "default", 6),
-                "limit", Map.of("type", "integer", "description", "Maximum number of matches to return (default 500)", "default", 500)
+                "min_string_length", Map.of("type", "integer", "minimum", 1, "maximum", 65536,
+                    "description", "Minimum string length to consider (default 6)", "default", 6),
+                "limit", Map.of("type", "integer", "minimum", 1, "maximum", QueryPageBounds.MAX_LIMIT,
+                    "description", "Maximum number of matches to return (default 500)", "default", 500)
             ),
             List.of("source_program", "target_program"), null, null, null);
+    }
+
+    @Override
+    public Map<String, Object> getOutputSchema() {
+        Map<String, Object> programRef = MatcherContracts.objectSchema(props(
+            "program_id", Map.of("type", "string"),
+            "name", Map.of("type", "string"),
+            "modification_number", Map.of("type", "string"),
+            "language", Map.of("type", "string"),
+            "processor", Map.of("type", "string")
+        ), List.of("program_id", "name", "modification_number"));
+        Map<String, Object> match = MatcherContracts.objectSchema(props(
+            "source_name", Map.of("type", "string"),
+            "source_addr", Map.of("type", "string"),
+            "target_name", Map.of("type", "string"),
+            "target_addr", Map.of("type", "string"),
+            "anchor_string", Map.of("type", "string"),
+            "anchor_preview", Map.of("type", "string"),
+            "anchor_truncated", Map.of("type", "boolean"),
+            "anchor_length", Map.of("type", "integer", "minimum", 0),
+            "source_occurrence_count", Map.of("type", "integer", "minimum", 0),
+            "target_occurrence_count", Map.of("type", "integer", "minimum", 0),
+            "source_function_ref_count", Map.of("type", "integer", "minimum", 0),
+            "target_function_ref_count", Map.of("type", "integer", "minimum", 0),
+            "unique_anchor", Map.of("type", "boolean"),
+            "names_already_equal", Map.of("type", "boolean")
+        ), List.of("source_name", "source_addr", "target_name", "target_addr",
+            "anchor_string", "anchor_preview", "anchor_truncated", "unique_anchor"));
+        Map<String, Object> properties = new LinkedHashMap<>();
+        properties.put("source_program", programRef);
+        properties.put("target_program", programRef);
+        properties.put("min_string_length", Map.of("type", "integer"));
+        properties.put("limit", Map.of("type", "integer"));
+        properties.put("source_string_count", Map.of("type", "integer", "minimum", 0));
+        properties.put("target_string_count", Map.of("type", "integer", "minimum", 0));
+        properties.put("unique_anchor_count", Map.of("type", "integer", "minimum", 0));
+        properties.put("candidate_count", Map.of("type", "integer", "minimum", 0));
+        properties.put("result_cap", Map.of("type", "integer", "minimum", 1));
+        properties.put("scan_complete", Map.of("type", "boolean"));
+        properties.put("scan_truncated", Map.of("type", "boolean"));
+        properties.put("cancelled", Map.of("type", "boolean"));
+        properties.put("unique", Map.of("type", "boolean"));
+        properties.put("matches", Map.of("type", "array", "items", match, "maxItems", QueryPageBounds.MAX_LIMIT));
+        return MatcherContracts.objectSchema(properties, List.of(
+            "source_program", "target_program", "candidate_count", "result_cap",
+            "scan_complete", "scan_truncated", "cancelled", "unique", "matches"));
     }
 
     @Override
@@ -69,203 +122,165 @@ public class StringAnchorMatcherTool implements McpTool {
 
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram, GhidrAssistMCPBackend backend) {
+        return execute(arguments, currentProgram, backend, null);
+    }
+
+    @Override
+    public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram,
+            GhidrAssistMCPBackend backend, McpTask task) {
         if (backend == null) {
-            return McpSchema.CallToolResult.builder().isError(true)
-                .addTextContent("Backend context not available")
-                .build();
+            return ProjectToolSupport.error("Backend context not available");
         }
 
         String sourceProgramName = (String) arguments.get("source_program");
         String targetProgramName = (String) arguments.get("target_program");
-        int minStringLength = 6;
-        int limit = 500;
+        final int minStringLength;
+        final int limit;
+        try {
+            minStringLength = QueryPageBounds.integer(arguments, "min_string_length", 6, 1, 65536);
+            limit = QueryPageBounds.integer(arguments, "limit", 500, 1, QueryPageBounds.MAX_LIMIT);
+        } catch (IllegalArgumentException e) {
+            return ProjectToolSupport.error(e.getMessage());
+        }
 
-        if (arguments.get("min_string_length") instanceof Number)
-            minStringLength = ((Number) arguments.get("min_string_length")).intValue();
-        if (arguments.get("limit") instanceof Number)
-            limit = ((Number) arguments.get("limit")).intValue();
+        TaskMonitor monitor = task == null ? TaskMonitor.DUMMY : new McpTaskMonitor(task, 0, 100, "String anchor matcher");
 
         try (var sourceLease = ProgramSelection.lease(backend, sourceProgramName, currentProgram);
              var targetLease = ProgramSelection.lease(backend, targetProgramName, currentProgram)) {
-        Program sourceProgram = sourceLease.program(), targetProgram = targetLease.program();
+            Program sourceProgram = sourceLease.program();
+            Program targetProgram = targetLease.program();
 
-        // Step 1: Build string-to-function map for source program
-        Map<String, List<FuncRef>> sourceStringMap = buildStringFunctionMap(sourceProgram, minStringLength);
+            IndexOutcome sourceIndex = buildStringFunctionMap(sourceProgram, minStringLength, monitor);
+            IndexOutcome targetIndex = buildStringFunctionMap(targetProgram, minStringLength, monitor);
+            boolean cancelled = sourceIndex.cancelled || targetIndex.cancelled;
 
-        // Step 2: Build string-to-function map for target program
-        Map<String, List<FuncRef>> targetStringMap = buildStringFunctionMap(targetProgram, minStringLength);
+            List<Map<String, Object>> matches = new ArrayList<>();
+            int uniqueAnchorCount = 0;
 
-        // Step 3: Find strings that are unique anchors in both programs
-        List<StringMatch> matches = new ArrayList<>();
+            for (Map.Entry<String, StringStats> entry : sourceIndex.stats.entrySet()) {
+                if (cancelled) break;
+                String str = entry.getKey();
+                StringStats sourceStats = entry.getValue();
+                StringStats targetStats = targetIndex.stats.get(str);
+                if (targetStats == null) continue;
+                if (sourceStats.functions.size() != 1 || targetStats.functions.size() != 1) continue;
 
-        for (Map.Entry<String, List<FuncRef>> entry : sourceStringMap.entrySet()) {
-            String str = entry.getKey();
-            List<FuncRef> sourceRefs = entry.getValue();
+                boolean unique = MatcherContracts.uniqueAnchor(sourceStats.occurrences, sourceStats.functions.size())
+                    && MatcherContracts.uniqueAnchor(targetStats.occurrences, targetStats.functions.size());
+                if (unique) uniqueAnchorCount++;
 
-            // String must be referenced by exactly one function in source
-            if (sourceRefs.size() != 1) continue;
-
-            List<FuncRef> targetRefs = targetStringMap.get(str);
-            if (targetRefs == null) continue;
-
-            // String must be referenced by exactly one function in target
-            if (targetRefs.size() != 1) continue;
-
-            FuncRef sourceRef = sourceRefs.get(0);
-            FuncRef targetRef = targetRefs.get(0);
-
-            // Skip if source function is auto-named (not useful to transfer)
-            if (sourceRef.funcName.startsWith("FUN_")) continue;
-
-            // Skip if target already has same name (already matched)
-            if (targetRef.funcName.equals(sourceRef.funcName)) continue;
-
-            matches.add(new StringMatch(
-                str, sourceRef.funcName, sourceRef.funcAddr,
-                targetRef.funcName, targetRef.funcAddr));
-
-            if (matches.size() >= limit) break;
-        }
-
-        // Sort by source function name for readability
-        matches.sort((a, b) -> a.sourceFuncName.compareTo(b.sourceFuncName));
-
-        // Format output
-        StringBuilder result = new StringBuilder();
-        result.append("String Anchor Match Results\n");
-        result.append("==========================\n");
-        result.append("Source: ").append(sourceProgramName).append("\n");
-        result.append("Target: ").append(targetProgramName).append("\n");
-        result.append("Unique strings in source: ").append(countUnique(sourceStringMap)).append("\n");
-        result.append("Unique strings in target: ").append(countUnique(targetStringMap)).append("\n");
-        result.append("Matched function pairs: ").append(matches.size()).append("\n\n");
-
-        if (matches.isEmpty()) {
-            result.append("No string-anchored matches found.");
-        } else {
-            // Output as JSON for easy consumption
-            result.append("[\n");
-            for (int i = 0; i < matches.size(); i++) {
-                StringMatch m = matches.get(i);
-                if (i > 0) result.append(",\n");
-                result.append("  {");
-                result.append("\"source_name\":").append(escapeJson(m.sourceFuncName));
-                result.append(",\"source_addr\":\"").append(m.sourceFuncAddr).append("\"");
-                result.append(",\"target_name\":").append(escapeJson(m.targetFuncName));
-                result.append(",\"target_addr\":\"").append(m.targetFuncAddr).append("\"");
-                result.append(",\"anchor_string\":").append(escapeJson(truncate(m.anchorString, 60)));
-                result.append("}");
+                FuncRef sourceRef = sourceStats.functions.values().iterator().next();
+                FuncRef targetRef = targetStats.functions.values().iterator().next();
+                Map<String, Object> row = new LinkedHashMap<>(MatcherContracts.anchorFields(str, MatcherContracts.DEFAULT_ANCHOR_PREVIEW));
+                row.put("source_name", sourceRef.funcName);
+                row.put("source_addr", sourceRef.funcAddr);
+                row.put("target_name", targetRef.funcName);
+                row.put("target_addr", targetRef.funcAddr);
+                row.put("source_occurrence_count", sourceStats.occurrences);
+                row.put("target_occurrence_count", targetStats.occurrences);
+                row.put("source_function_ref_count", sourceStats.functions.size());
+                row.put("target_function_ref_count", targetStats.functions.size());
+                row.put("unique_anchor", unique);
+                row.put("names_already_equal", sourceRef.funcName.equals(targetRef.funcName));
+                matches.add(row);
             }
-            result.append("\n]");
-        }
 
-        return McpSchema.CallToolResult.builder()
-            .addTextContent(result.toString())
-            .build();
-        } catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
+            matches.sort((a, b) -> {
+                int uniqueCmp = Boolean.compare((Boolean) b.get("unique_anchor"), (Boolean) a.get("unique_anchor"));
+                if (uniqueCmp != 0) return uniqueCmp;
+                return ((String) a.get("source_name")).compareTo((String) b.get("source_name"));
+            });
+            boolean moreExist = matches.size() > limit;
+            if (moreExist) matches = new ArrayList<>(matches.subList(0, limit));
+
+            MatcherContracts.ScanStatus status = MatcherContracts.scanStatus(
+                matches.size(), limit, moreExist, cancelled, !cancelled);
+
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("source_program", MatcherContracts.programRef(sourceProgram));
+            body.put("target_program", MatcherContracts.programRef(targetProgram));
+            body.put("min_string_length", minStringLength);
+            body.put("limit", limit);
+            body.put("source_string_count", sourceIndex.stats.size());
+            body.put("target_string_count", targetIndex.stats.size());
+            body.put("unique_anchor_count", uniqueAnchorCount);
+            body.putAll(MatcherContracts.scanFields(status));
+            body.put("matches", matches);
+
+            String summary = "String anchor match: " + matches.size() + " candidate(s), unique_anchor_count="
+                + uniqueAnchorCount + ", scan_complete=" + status.scanComplete()
+                + ", scan_truncated=" + status.scanTruncated() + ".";
+            return QueryPageBounds.result(summary, body);
+        } catch (IllegalArgumentException e) {
+            return ProjectToolSupport.error(e.getMessage());
+        }
     }
 
-    /**
-     * Build a map of string value -> list of functions that reference that string.
-     */
-    private Map<String, List<FuncRef>> buildStringFunctionMap(Program program, int minLength) {
-        Map<String, List<FuncRef>> stringMap = new HashMap<>();
+    private IndexOutcome buildStringFunctionMap(Program program, int minLength, TaskMonitor monitor) {
+        IndexOutcome outcome = new IndexOutcome();
         ReferenceManager refMgr = program.getReferenceManager();
-
-        // Iterate all defined strings in the program
         var dataIter = program.getListing().getDefinedData(true);
-        while (dataIter.hasNext()) {
-            Data data = dataIter.next();
-            if (!data.hasStringValue()) continue;
+        try {
+            while (dataIter.hasNext()) {
+                monitor.checkCancelled();
+                Data data = dataIter.next();
+                if (!data.hasStringValue()) continue;
+                String strValue = stringValue(data);
+                if (strValue == null || strValue.length() < minLength) continue;
 
-            String strValue = data.getDefaultValueRepresentation();
-            if (strValue == null) continue;
+                Address strAddr = data.getAddress();
+                StringStats stats = outcome.stats.computeIfAbsent(strValue, k -> new StringStats());
+                stats.occurrences++;
 
-            // Strip surrounding quotes if present
-            if (strValue.startsWith("\"") && strValue.endsWith("\"") && strValue.length() > 2) {
-                strValue = strValue.substring(1, strValue.length() - 1);
-            }
-
-            if (strValue.length() < minLength) continue;
-
-            // Find functions that reference this string
-            Address strAddr = data.getAddress();
-            var refIter = refMgr.getReferencesTo(strAddr);
-
-            Map<String, FuncRef> funcsSeen = new HashMap<>();
-            while (refIter.hasNext()) {
-                Reference ref = refIter.next();
-                Address fromAddr = ref.getFromAddress();
-                Function func = program.getFunctionManager().getFunctionContaining(fromAddr);
-                if (func != null && !funcsSeen.containsKey(func.getName())) {
-                    funcsSeen.put(func.getName(),
-                        new FuncRef(func.getName(), func.getEntryPoint().toString()));
+                var refIter = refMgr.getReferencesTo(strAddr);
+                while (refIter.hasNext()) {
+                    monitor.checkCancelled();
+                    Reference ref = refIter.next();
+                    Function func = program.getFunctionManager().getFunctionContaining(ref.getFromAddress());
+                    if (func == null) continue;
+                    String entry = func.getEntryPoint().toString();
+                    stats.functions.putIfAbsent(entry, new FuncRef(func.getName(true), entry));
                 }
             }
-
-            if (!funcsSeen.isEmpty()) {
-                stringMap.computeIfAbsent(strValue, k -> new ArrayList<>())
-                    .addAll(funcsSeen.values());
-            }
+        } catch (CancelledException e) {
+            outcome.cancelled = true;
         }
-
-        return stringMap;
+        return outcome;
     }
 
-    private int countUnique(Map<String, List<FuncRef>> map) {
-        int count = 0;
-        for (List<FuncRef> refs : map.values()) {
-            if (refs.size() == 1) count++;
+    private static String stringValue(Data data) {
+        Object value = data.getValue();
+        if (value instanceof String s) return s;
+        String repr = data.getDefaultValueRepresentation();
+        if (repr == null) return null;
+        if (repr.length() >= 2 && repr.startsWith("\"") && repr.endsWith("\"")) {
+            return repr.substring(1, repr.length() - 1);
         }
-        return count;
+        return repr;
     }
 
-    private static String truncate(String s, int max) {
-        if (s == null) return "";
-        return s.length() > max ? s.substring(0, max) + "..." : s;
+    private static Map<String, Object> props(Object... entries) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        for (int i = 0; i < entries.length; i += 2) result.put((String) entries[i], entries[i + 1]);
+        return result;
     }
 
-    private static String escapeJson(String s) {
-        if (s == null) return "null";
-        StringBuilder sb = new StringBuilder("\"");
-        for (char c : s.toCharArray()) {
-            switch (c) {
-                case '"': sb.append("\\\""); break;
-                case '\\': sb.append("\\\\"); break;
-                case '\n': sb.append("\\n"); break;
-                case '\r': sb.append("\\r"); break;
-                case '\t': sb.append("\\t"); break;
-                default:
-                    if (c < 0x20) sb.append(String.format("\\u%04x", (int) c));
-                    else sb.append(c);
-            }
-        }
-        sb.append("\"");
-        return sb.toString();
+    private static final class IndexOutcome {
+        final Map<String, StringStats> stats = new LinkedHashMap<>();
+        boolean cancelled;
     }
 
-    private static class FuncRef {
-        String funcName;
-        String funcAddr;
+    private static final class StringStats {
+        int occurrences;
+        final Map<String, FuncRef> functions = new LinkedHashMap<>();
+    }
+
+    private static final class FuncRef {
+        final String funcName;
+        final String funcAddr;
         FuncRef(String name, String addr) {
             this.funcName = name;
             this.funcAddr = addr;
-        }
-    }
-
-    private static class StringMatch {
-        String anchorString;
-        String sourceFuncName;
-        String sourceFuncAddr;
-        String targetFuncName;
-        String targetFuncAddr;
-
-        StringMatch(String anchor, String srcName, String srcAddr, String tgtName, String tgtAddr) {
-            this.anchorString = anchor;
-            this.sourceFuncName = srcName;
-            this.sourceFuncAddr = srcAddr;
-            this.targetFuncName = tgtName;
-            this.targetFuncAddr = tgtAddr;
         }
     }
 }
