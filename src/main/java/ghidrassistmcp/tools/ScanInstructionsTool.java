@@ -28,9 +28,9 @@ public class ScanInstructionsTool implements McpTool {
     @Override public McpSchema.JsonSchema getInputSchema() {
         return new McpSchema.JsonSchema("object", Map.of(
             "ranges", Map.of("type", "string", "description", "Comma-separated half-open [start,end) ranges"),
-            "mnemonics", Map.of("type", "array", "items", Map.of("type", "string")),
+            "mnemonics", Map.of("type", "array", "maxItems", 256, "items", Map.of("type", "string", "minLength", 1)),
             "operand_contains", Map.of("type", "string"),
-            "max_instructions", Map.of("type", "integer", "default", DEFAULT_LIMIT),
+            "max_instructions", Map.of("type", "integer", "minimum", 1, "maximum", MAX_LIMIT, "default", DEFAULT_LIMIT),
             "include_bytes", Map.of("type", "boolean", "default", false)
         ), List.of("ranges"), null, null, null);
     }

@@ -47,9 +47,9 @@ public class FunctionByteMatcherTool implements McpTool {
         return new McpSchema.JsonSchema("object",
             Map.of(
                 "source_function", Map.of("type", "string", "description", "Function name or address in the source program"),
-                "source_program", Map.of("type", "string", "description", "Name of the source program (with known symbols)"),
-                "target_program", Map.of("type", "string", "description", "Name of the target program to search in"),
-                "match_bytes", Map.of("type", "integer", "description", "Number of entry bytes to use for matching (default 24)", "default", 24),
+                "source_program", Map.of("type", "string", "description", "Exact source program_id or unique name (with known symbols)"),
+                "target_program", Map.of("type", "string", "description", "Exact target program_id or unique name to search in"),
+                "match_bytes", Map.of("type", "integer", "minimum", 1, "maximum", 65536, "description", "Number of entry bytes to use for matching (default 24)", "default", 24),
                 "mask_mode", Map.of("type", "string", "description",
                     "How to handle relocatable operands: 'auto' masks every 4th byte group in branch/call instructions, " +
                     "'none' uses raw bytes, 'aggressive' masks more liberally. Default: auto",
@@ -61,7 +61,7 @@ public class FunctionByteMatcherTool implements McpTool {
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
         return McpSchema.CallToolResult.builder()
-            .addTextContent("This tool requires backend context for multi-program access.")
+            .isError(true).addTextContent("This tool requires backend context for multi-program access.")
             .build();
     }
 
@@ -69,46 +69,37 @@ public class FunctionByteMatcherTool implements McpTool {
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram, GhidrAssistMCPBackend backend) {
         if (backend == null) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Backend context not available")
+                .isError(true).addTextContent("Backend context not available")
                 .build();
         }
 
         String sourceFuncId = (String) arguments.get("source_function");
         String sourceProgramName = (String) arguments.get("source_program");
         String targetProgramName = (String) arguments.get("target_program");
-        int matchBytes = 24;
+        final int matchBytes;
         String maskMode = "auto";
 
-        if (arguments.get("match_bytes") instanceof Number)
-            matchBytes = ((Number) arguments.get("match_bytes")).intValue();
+        try { matchBytes = QueryPageBounds.integer(arguments, "match_bytes", 24, 1, 65536); }
+        catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
         if (arguments.get("mask_mode") instanceof String)
             maskMode = (String) arguments.get("mask_mode");
 
-        // Resolve programs
-        Program sourceProgram = findProgram(backend, sourceProgramName);
-        Program targetProgram = findProgram(backend, targetProgramName);
-
-        if (sourceProgram == null) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Source program not found: " + sourceProgramName)
-                .build();
-        }
-        if (targetProgram == null) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Target program not found: " + targetProgramName)
-                .build();
-        }
+        // Retain both exact selections until matching and result formatting complete.
+        try (ProgramSelection.Lease sourceLease = ProgramSelection.lease(backend, sourceProgramName, currentProgram);
+             ProgramSelection.Lease targetLease = ProgramSelection.lease(backend, targetProgramName, currentProgram)) {
+        Program sourceProgram = sourceLease.program();
+        Program targetProgram = targetLease.program();
 
         // Find source function
         Function sourceFunc = findFunction(sourceProgram, sourceFuncId);
         if (sourceFunc == null) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Function not found in source program: " + sourceFuncId)
+                .isError(true).addTextContent("Function not found in source program: " + sourceFuncId)
                 .build();
         }
 
         long sourceFuncSize = sourceFunc.getBody().getNumAddresses();
-        int bytesToRead = Math.min(matchBytes, (int) sourceFuncSize);
+        int bytesToRead = (int) Math.min((long) matchBytes, sourceFuncSize);
 
         // Read source function entry bytes
         Memory sourceMem = sourceProgram.getMemory();
@@ -123,7 +114,7 @@ public class FunctionByteMatcherTool implements McpTool {
             }
         } catch (MemoryAccessException e) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Failed to read source function bytes: " + e.getMessage())
+                .isError(true).addTextContent("Failed to read source function bytes: " + e.getMessage())
                 .build();
         }
 
@@ -162,7 +153,7 @@ public class FunctionByteMatcherTool implements McpTool {
             }
         } catch (Exception e) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Error during search: " + e.getMessage())
+                .isError(true).addTextContent("Error during search: " + e.getMessage())
                 .build();
         }
 
@@ -197,6 +188,7 @@ public class FunctionByteMatcherTool implements McpTool {
         return McpSchema.CallToolResult.builder()
             .addTextContent(result.toString())
             .build();
+        } catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
     }
 
     /**
@@ -274,28 +266,8 @@ public class FunctionByteMatcherTool implements McpTool {
         return Math.min(confidence, 1.0);
     }
 
-    private Program findProgram(GhidrAssistMCPBackend backend, String name) {
-        for (Program p : backend.getAllOpenPrograms()) {
-            if (p.getName().equals(name)) return p;
-        }
-        return null;
-    }
-
     private Function findFunction(Program program, String identifier) {
-        // Try by name first
-        for (Function f : program.getFunctionManager().getFunctions(true)) {
-            if (f.getName().equals(identifier)) return f;
-        }
-        // Try by address
-        try {
-            Address addr = program.getAddressFactory().getAddress(identifier);
-            if (addr != null) {
-                return program.getFunctionManager().getFunctionAt(addr);
-            }
-        } catch (Exception e) {
-            // ignore
-        }
-        return null;
+        return FunctionLookup.resolve(program, identifier);
     }
 
     private String bytesToHex(byte[] bytes, byte[] mask) {

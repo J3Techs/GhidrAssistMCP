@@ -1,0 +1,25 @@
+# Merge this example into the chosen Codex configuration; it is not loaded automatically.
+# Start GhidrAssistMCP separately and use the actual listener address.
+[mcp_servers.ghidra]
+url = "http://127.0.0.1:8080/mcp"
+startup_timeout_sec = 20
+tool_timeout_sec = 75
+
+# Optional focused catalog. Omit enabled_tools to expose every server-enabled tool.
+# Add VT, BSim, type-editing and project-administration tools when needed.
+enabled_tools = [
+  "runtime_capabilities", "list_binaries", "get_binary_info",
+  "get_functions", "function_inventory", "search_functions_by_name", "search_strings",
+  "get_code", "analyze_function", "get_function_signature", "get_function_statistics",
+  "get_segments", "get_imports", "get_exports", "get_strings",
+  "query_address_context_batch", "search_symbols_batch", "read_memory_batch",
+  "read_memory_table", "xrefs", "xrefs_batch", "get_register_context",
+  "wait_task", "get_task_status", "list_tasks", "cancel_task", "save_program"
+]
+
+# Client truncation limits do not preserve omitted server data or cancel native execution.
+[mcp_servers.ghidra.tools.get_code]
+output_token_limit = 24000
+
+[mcp_servers.ghidra.tools.get_task_status]
+output_token_limit = 24000

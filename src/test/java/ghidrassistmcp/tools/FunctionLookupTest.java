@@ -81,6 +81,18 @@ class FunctionLookupTest {
         assertSame(dynamic, FunctionLookup.findByName(testProgram.program, "FUN_00001000"));
     }
 
+    @Test void resolvesEntryInteriorAndQualifiedThunkConsistently() {
+        TestProgram p = new TestProgram();
+        Namespace global = p.namespace("Global", null, true);
+        Namespace ns = p.namespace("lib", global, false);
+        Function thunk = p.function("copy", 0x100, false, ns);
+        Function external = p.function("copy", 0x900, true, ns, 0x100);
+        p.index("copy", external);
+        assertSame(thunk, FunctionLookup.resolve(p.program, "0x100"));
+        assertSame(thunk, FunctionLookup.resolve(p.program, "101"));
+        assertSame(thunk, FunctionLookup.resolve(p.program, "lib::copy"));
+    }
+
     private static final class TestProgram {
         private final AddressSpace addressSpace =
             new GenericAddressSpace("ram", 64, AddressSpace.TYPE_RAM, 0);
@@ -89,6 +101,7 @@ class FunctionLookupTest {
         private final FunctionManager functionManager = fake(FunctionManager.class,
             (method, args) -> switch (method.getName()) {
                 case "getFunctionAt" -> functionsByAddress.get(args[0]);
+                case "getFunctionContaining" -> functionsByAddress.get(((Address)args[0]).subtract(1));
                 default -> unsupported(method);
             });
         private final SymbolTable symbolTable = fake(SymbolTable.class,
@@ -98,6 +111,10 @@ class FunctionLookupTest {
             });
         private final AddressFactory addressFactory = fake(AddressFactory.class,
             (method, args) -> switch (method.getName()) {
+                case "getAddress" -> {
+                    try { yield addressSpace.getAddress(Long.parseUnsignedLong(((String)args[0]).replaceFirst("^0[xX]", ""), 16)); }
+                    catch (NumberFormatException e) { yield null; }
+                }
                 case "getAddressSpace" -> null;
                 case "getDefaultAddressSpace" -> addressSpace;
                 default -> unsupported(method);

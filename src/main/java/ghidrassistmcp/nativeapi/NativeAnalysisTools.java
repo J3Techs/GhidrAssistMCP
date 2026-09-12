@@ -46,6 +46,7 @@ public final class NativeAnalysisTools {
         abstract McpSchema.CallToolResult run(Map<String,Object>a,Program p,GhidrAssistMCPBackend b,TaskMonitor monitor)throws Exception;
     }
     static final class ArchiveCatalog extends NativeTool {
+        public boolean isOpenWorld(){return true;}
         public String getName(){return "datatype_archive_catalog";}
         public String getDescription(){return "Read-only native GDT catalog with exact type paths, archive SHA-256 and paged metadata.";}
         public McpSchema.JsonSchema getInputSchema(){return schema(Map.of("path",prop("string"),"offset",prop("integer"),"limit",prop("integer")),"path");}
@@ -58,6 +59,7 @@ public final class NativeAnalysisTools {
         }
     }
     static final class ParseC extends NativeTool {
+        public boolean isOpenWorld(){return true;}
         public String getName(){return "parse_c_declarations";}
         public String getDescription(){return "Parse C declaration text or explicit header_paths into a staged GDT for review. max_bytes limits explicit inputs only, not transitive includes or macro expansion. Uses a selected language/compiler and never modifies the program.";}
         public boolean isReadOnly(){return false;}
@@ -96,6 +98,7 @@ public final class NativeAnalysisTools {
         }return out;
     }
     static final class ImportTypes extends NativeTool {
+        public boolean isOpenWorld(){return true;}
         private static DataTypeConflictHandler conflictHandler(String policy){return new DataTypeConflictHandler(){
             public ConflictResult resolveConflict(DataType added,DataType existing){return policy.equals("replace")?ConflictResult.REPLACE_EXISTING:ConflictResult.USE_EXISTING;}
             public boolean shouldUpdate(DataType source,DataType local){return policy.equals("replace");}

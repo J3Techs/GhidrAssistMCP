@@ -39,8 +39,8 @@ class BsimExternalBackendLifecycleTest {
         Assumptions.assumeTrue(url != null && !url.isBlank(),
             "Set " + variable + " to a disposable BSim URL");
 
-        BsimContext context = new BsimContext(null, null,
-            new BsimConnections(temporary.resolve("settings")), temporary, null);
+        try (BsimContext context = new BsimContext(null, null,
+            new BsimConnections(temporary.resolve("settings")), temporary, null)) {
         Map<String, Object> target = Map.of("database_url", url);
         Map<String, Object> created = operation("create_database").handler().execute(context,
             Map.of("database_url", url, "template",
@@ -59,6 +59,7 @@ class BsimExternalBackendLifecycleTest {
         Map<String, Object> dropped = operation("drop_database").handler().execute(context,
             Map.of("database_url", url, "confirm", true), TaskMonitor.DUMMY);
         assertEquals(true, dropped.get("dropped"));
+        }
     }
 
     private static BsimOperation operation(String name) {

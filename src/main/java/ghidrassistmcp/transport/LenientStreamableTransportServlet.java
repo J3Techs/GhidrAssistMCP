@@ -22,12 +22,19 @@ public class LenientStreamableTransportServlet extends HttpServlet {
 
     private final HttpServletStreamableServerTransportProvider delegate;
     private final String mcpEndpoint;
+    private final boolean lenientAccept;
 
     public LenientStreamableTransportServlet(
             HttpServletStreamableServerTransportProvider delegate,
             String mcpEndpoint) {
+        this(delegate, mcpEndpoint, false);
+    }
+
+    public LenientStreamableTransportServlet(HttpServletStreamableServerTransportProvider delegate,
+            String mcpEndpoint, boolean lenientAccept) {
         this.delegate = Objects.requireNonNull(delegate, "delegate must not be null");
         this.mcpEndpoint = Objects.requireNonNull(mcpEndpoint, "mcpEndpoint must not be null");
+        this.lenientAccept = lenientAccept;
     }
 
     @Override
@@ -59,7 +66,7 @@ public class LenientStreamableTransportServlet extends HttpServlet {
                 if (name == null) {
                     return super.getHeader(null);
                 }
-                if (ACCEPT.equalsIgnoreCase(name)) {
+                if (lenientAccept && ACCEPT.equalsIgnoreCase(name)) {
                     return normalizeAccept(super.getHeader(name));
                 }
                 return super.getHeader(name);
@@ -67,7 +74,7 @@ public class LenientStreamableTransportServlet extends HttpServlet {
 
             @Override
             public Enumeration<String> getHeaders(String name) {
-                if (name != null && ACCEPT.equalsIgnoreCase(name)) {
+                if (lenientAccept && name != null && ACCEPT.equalsIgnoreCase(name)) {
                     return Collections.enumeration(Collections.singletonList(normalizeAccept(super.getHeader(name))));
                 }
                 return super.getHeaders(name);

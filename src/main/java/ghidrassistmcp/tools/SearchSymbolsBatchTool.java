@@ -7,6 +7,8 @@ import io.modelcontextprotocol.spec.McpSchema;
 import java.util.*;
 
 public class SearchSymbolsBatchTool implements McpTool {
+  @Override public Map<String, Object> getOutputSchema() { return BatchResultSchemas.symbols(); }
+
   public String getName() {
     return "search_symbols_batch";
   }
@@ -21,7 +23,7 @@ public class SearchSymbolsBatchTool implements McpTool {
         "object",
         Map.of(
             "queries",
-            Map.of("type", "array", "items", Map.of("type", "string")),
+            Map.of("type", "array", "minItems", 1, "maxItems", 64, "items", Map.of("type", "string", "minLength", 1)),
             "mode",
             Map.of(
                 "type",
@@ -35,9 +37,9 @@ public class SearchSymbolsBatchTool implements McpTool {
             "source",
             Map.of("type", "string"),
             "limit",
-            Map.of("type", "integer", "default", 500),
+            Map.of("type", "integer", "minimum", 0, "maximum", 1000, "default", 500),
             "scan_limit",
-            Map.of("type", "integer", "default", 10000)),
+            Map.of("type", "integer", "minimum", 0, "maximum", 100000, "default", 10000)),
         List.of("queries"),
         null,
         null,

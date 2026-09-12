@@ -7,6 +7,8 @@ import io.modelcontextprotocol.spec.McpSchema;
 import java.util.*;
 
 public class ReadMemoryTableTool implements McpTool {
+  @Override public Map<String, Object> getOutputSchema() { return BatchResultSchemas.table(); }
+
   public String getName() {
     return "read_memory_table";
   }
@@ -22,13 +24,14 @@ public class ReadMemoryTableTool implements McpTool {
             "base",
             Map.of("type", "string"),
             "rows",
-            Map.of("type", "integer"),
+            Map.of("type", "integer", "minimum", 0, "maximum", 1000),
             "stride",
-            Map.of("type", "integer"),
+            Map.of("type", "integer", "minimum", 1, "maximum", 65536),
             "fields",
             Map.of(
                 "type",
                 "array",
+                "minItems", 1, "maxItems", 64,
                 "items",
                 Map.of(
                     "type",
@@ -38,9 +41,9 @@ public class ReadMemoryTableTool implements McpTool {
                         "name",
                         Map.of("type", "string"),
                         "offset",
-                        Map.of("type", "integer"),
+                        Map.of("type", "integer", "minimum", 0, "maximum", 65536),
                         "width",
-                        Map.of("type", "integer"),
+                        Map.of("type", "integer", "enum", List.of(1, 2, 4, 8)),
                         "type", Map.of("type", "string", "enum", List.of("u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64"))),
                     "required",
                     List.of("offset", "width"))),
@@ -85,6 +88,7 @@ public class ReadMemoryTableTool implements McpTool {
         throw new IllegalArgumentException("total byte budget exceeded");
       List<Object> result = new ArrayList<>();
       int errors = 0;
+      boolean truncated = false;
       for (int i = 0; i < rows; i++) {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("index", i);
@@ -99,6 +103,7 @@ public class ReadMemoryTableTool implements McpTool {
             if (name.equals("index") || name.equals("address"))
               throw new IllegalArgumentException("field name reserved: " + name);
             Map<String, Object> b = BatchQuerySupport.bytes(p, ad.add(off), w);
+            truncated |= Boolean.TRUE.equals(b.get("truncated"));
             row.put(
                 name,
                 b.get("truncated") instanceof Boolean && ((Boolean) b.get("truncated"))
@@ -113,7 +118,7 @@ public class ReadMemoryTableTool implements McpTool {
         result.add(row);
       }
       return ProjectToolSupport.result(
-          Map.of("rows", result, "count", result.size(), "errors", errors, "truncated", false));
+          Map.of("rows", result, "count", result.size(), "errors", errors, "truncated", truncated, "partial", errors > 0 || truncated), errors > 0 && errors == result.size());
     } catch (Exception e) {
       return ProjectToolSupport.error(e.getMessage());
     }

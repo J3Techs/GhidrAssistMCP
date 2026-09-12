@@ -6,6 +6,11 @@ package ghidrassistmcp.tasks;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
+import java.util.LinkedHashMap;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 
 import io.modelcontextprotocol.spec.McpSchema;
 
@@ -38,6 +43,7 @@ public class McpTask {
     private volatile String errorMessage;
     private volatile int progressPercent;
     private volatile String progressMessage;
+    private volatile long stateVersion;
 
     /**
      * Create a new task
@@ -53,7 +59,7 @@ public class McpTask {
                    McpProgramContext programContext) {
         this.taskId = UUID.randomUUID().toString();
         this.toolName = toolName;
-        this.arguments = arguments;
+        this.arguments = freezeArguments(arguments);
         this.programContext = programContext != null
                 ? programContext
                 : McpProgramContext.empty();
@@ -67,6 +73,80 @@ public class McpTask {
 
     public String getTaskId() {
         return taskId;
+    }
+
+    /** Freeze JSON arguments, including nested containers, before a worker is queued. */
+    public static Map<String, Object> freezeArguments(Map<String, Object> arguments) {
+        Map<String, Object> copy = new LinkedHashMap<>();
+        if (arguments != null) arguments.forEach((key, value) -> copy.put(key, freezeValue(value)));
+        return Collections.unmodifiableMap(copy);
+    }
+
+    private static Object freezeValue(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<Object, Object> copy = new LinkedHashMap<>();
+            map.forEach((key, nested) -> copy.put(key, freezeValue(nested)));
+            return Collections.unmodifiableMap(copy);
+        }
+        if (value instanceof List<?> list) return Collections.unmodifiableList(
+            list.stream().map(McpTask::freezeValue).collect(java.util.stream.Collectors.toList()));
+        return value;
+    }
+
+    public long getStateVersion() { return stateVersion; }
+
+    private void changed() { stateVersion++; notifyAll(); }
+
+    /** Atomic, bounded metadata. Large operation results remain available via get_task_status. */
+    public synchronized Map<String, Object> snapshot() {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("task_id", taskId);
+        value.put("tool_name", clipped(toolName));
+        value.put("state_version", stateVersion);
+        value.put("status", status.name());
+        value.put("terminal", isTerminal());
+        value.put("progress_percent", progressPercent);
+        value.put("progress_message", clipped(progressMessage));
+        value.put("created_at", createdAt.toString());
+        if (startedAt != null) value.put("started_at", startedAt.toString());
+        if (completedAt != null) value.put("completed_at", completedAt.toString());
+        value.put("duration_ms", getDurationMillis());
+        value.put("result_available", isTerminal() && result != null);
+        if (errorMessage != null) value.put("error_message", clipped(errorMessage));
+        Map<String, Object> program = new LinkedHashMap<>();
+        if (programContext.programName() != null) program.put("name", clipped(programContext.programName()));
+        if (programContext.projectPath() != null) program.put("project_path", clipped(programContext.projectPath()));
+        if (programContext.fileId() != null) program.put("file_id", clipped(programContext.fileId()));
+        if (programContext.programId() != null) program.put("program_id", clipped(programContext.programId()));
+        value.put("program", program);
+        value.put("metadata_truncated", List.of(
+            Objects.toString(toolName, ""), Objects.toString(progressMessage, ""),
+            Objects.toString(errorMessage, ""), Objects.toString(programContext.programName(), ""),
+            Objects.toString(programContext.projectPath(), ""), Objects.toString(programContext.fileId(), ""),
+            Objects.toString(programContext.programId(), "")).stream().anyMatch(s -> s.length() > 2048));
+        return value;
+    }
+
+    private static String clipped(String value) {
+        return value == null ? "" : value.substring(0, Math.min(value.length(), 2048));
+    }
+
+    /** Wait for completion, or a version change when a cursor is supplied. Never cancels the worker. */
+    public synchronized Map<String, Object> awaitSnapshot(long timeoutMillis, Long afterVersion)
+            throws InterruptedException {
+        if (timeoutMillis < 0 || timeoutMillis > 30_000) throw new IllegalArgumentException("timeout_ms must be between 0 and 30000");
+        if (afterVersion != null && (afterVersion < 0 || afterVersion > stateVersion))
+            throw new IllegalArgumentException("after_version must be a previously observed state_version for this task");
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+        while (!isTerminal() && (afterVersion == null || stateVersion <= afterVersion)) {
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) break;
+            TimeUnit.NANOSECONDS.timedWait(this, remaining);
+        }
+        Map<String, Object> value = snapshot();
+        boolean changed = afterVersion != null && stateVersion > afterVersion;
+        value.put("wait_outcome", isTerminal() ? "terminal" : changed ? "changed" : "timeout");
+        return value;
     }
 
     public String getToolName() {
@@ -123,6 +203,7 @@ public class McpTask {
             this.status = Status.RUNNING;
             this.startedAt = Instant.now();
             this.progressMessage = "Running...";
+            changed();
         }
     }
 
@@ -131,8 +212,10 @@ public class McpTask {
      */
     public synchronized void updateProgress(int percent, String message) {
         if (this.status == Status.RUNNING) {
+            if (this.progressPercent == Math.max(0, Math.min(100, percent)) && Objects.equals(this.progressMessage, message)) return;
             this.progressPercent = Math.max(0, Math.min(100, percent));
             this.progressMessage = message;
+            changed();
         }
     }
 
@@ -147,6 +230,7 @@ public class McpTask {
             this.progressPercent = 100;
             this.progressMessage = "Completed";
             this.status = Status.COMPLETED;
+            changed();
         }
     }
 
@@ -160,6 +244,7 @@ public class McpTask {
             this.errorMessage = taskErrorMessage;
             this.progressMessage = "Failed: " + taskErrorMessage;
             this.status = Status.FAILED;
+            changed();
         }
     }
 
@@ -172,6 +257,7 @@ public class McpTask {
             this.completedAt = Instant.now();
             this.progressMessage = "Cancelled";
             this.status = Status.CANCELLED;
+            changed();
         }
     }
 
@@ -191,6 +277,7 @@ public class McpTask {
             this.result = taskResult;
             this.progressMessage = "Failed: " + taskErrorMessage;
             this.status = Status.FAILED;
+            changed();
         }
     }
 
@@ -199,6 +286,7 @@ public class McpTask {
         if (this.status == Status.PENDING || this.status == Status.RUNNING) {
             this.status = Status.CANCEL_REQUESTED;
             this.progressMessage = "Cancellation requested; waiting for worker to stop...";
+            changed();
             return true;
         }
         return false;

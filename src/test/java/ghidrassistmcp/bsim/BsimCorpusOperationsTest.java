@@ -85,7 +85,7 @@ class BsimCorpusOperationsTest {
             program.getDomainFile().save(TaskMonitor.DUMMY);
 
             BsimConnections connections = new BsimConnections(temporary.resolve("settings"));
-            BsimContext context = new BsimContext(program, null, connections, temporary, null);
+            try (BsimContext context = new BsimContext(program, null, connections, temporary, null)) {
             String first = temporary.resolve("first").toUri().toString();
             String second = temporary.resolve("second").toUri().toString();
             String rebuilt = temporary.resolve("rebuilt").toUri().toString();
@@ -158,6 +158,7 @@ class BsimCorpusOperationsTest {
             Map<String, Object> removed = operation("remove_executables").handler().execute(context,
                 Map.of("database_url", first, "name", "fixture", "apply", true), TaskMonitor.DUMMY);
             assertEquals(1, removed.get("removed"));
+            }
         } finally {
             if (program != null && !program.isClosed()) program.release(CONSUMER);
             project.close();

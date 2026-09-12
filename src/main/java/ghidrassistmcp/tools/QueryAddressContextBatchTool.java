@@ -9,6 +9,8 @@ import io.modelcontextprotocol.spec.McpSchema;
 import java.util.*;
 
 public class QueryAddressContextBatchTool implements McpTool {
+  @Override public Map<String, Object> getOutputSchema() { return BatchResultSchemas.context(); }
+
   public String getName() {
     return "query_address_context_batch";
   }
@@ -22,11 +24,11 @@ public class QueryAddressContextBatchTool implements McpTool {
         "object",
         Map.of(
             "addresses",
-            Map.of("type", "array", "items", Map.of("type", "string")),
+            Map.of("type", "array", "minItems", 1, "maxItems", 1000, "items", Map.of("type", "string", "minLength", 1)),
             "byte_length",
-            Map.of("type", "integer", "default", 16),
+            Map.of("type", "integer", "minimum", 0, "maximum", 65536, "default", 16),
             "xref_limit",
-            Map.of("type", "integer", "default", 32)),
+            Map.of("type", "integer", "minimum", 0, "maximum", 1000, "default", 32)),
         List.of("addresses"),
         null,
         null,
@@ -106,7 +108,12 @@ public class QueryAddressContextBatchTool implements McpTool {
       out.put("count", rows.size());
       out.put("errors", errors);
       out.put("truncated", rows.stream().anyMatch(row -> Boolean.TRUE.equals(((Map<?, ?>) row).get("truncated"))));
-      return ProjectToolSupport.result(out);
+      out.put("partial", errors > 0 || rows.stream().anyMatch(value -> {
+        Map<?, ?> row = (Map<?, ?>) value;
+        return Boolean.TRUE.equals(row.get("truncated")) || Boolean.TRUE.equals(row.get("symbols_truncated"))
+            || row.get("bytes") instanceof Map<?, ?> bytes && Boolean.TRUE.equals(bytes.get("truncated"));
+      }));
+      return ProjectToolSupport.result(out, errors == rows.size());
     } catch (Exception e) {
       return ProjectToolSupport.error(e.getMessage());
     }

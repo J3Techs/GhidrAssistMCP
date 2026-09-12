@@ -25,6 +25,7 @@ public class GhidrAssistMCPHeadlessServer {
     private HeadlessBackend headlessBackend;
     private HeadlessProjectBackend projectBackend;
     private volatile boolean running = false;
+    private volatile boolean stopping;
 
     private GhidrAssistMCPHeadlessServer() {
     }
@@ -56,7 +57,9 @@ public class GhidrAssistMCPHeadlessServer {
      * intended only for a disposable, container-isolated analysis environment.
      */
     public synchronized void start(Program program, String host, int port, String toolProfile) throws Exception {
+        if (stopping) throw new IllegalStateException("Headless server is stopping; retry stop before starting");
         if (running) {
+            if (headlessBackend == null) throw new IllegalStateException("Running MCP server is bound to a project runtime");
             Msg.info(this, "Headless MCP server already running, updating program");
             if (headlessBackend != null) {
                 headlessBackend.setProgram(program);
@@ -87,6 +90,8 @@ public class GhidrAssistMCPHeadlessServer {
 
     /** Start against the caller-owned project, without CodeBrowser services. */
     public synchronized void start(Program program, Project project, String host, int port, String toolProfile) throws Exception {
+        if (stopping) throw new IllegalStateException("Headless server is stopping; retry stop before starting");
+        if (project == null) throw new IllegalArgumentException("project is required for headless project access");
         if (running) {
             if (projectBackend == null || !java.util.Objects.equals(projectBackend.getProject().getProjectLocator(), project.getProjectLocator()))
                 throw new IllegalStateException("Running MCP server is bound to a different project/runtime");
@@ -106,10 +111,12 @@ public class GhidrAssistMCPHeadlessServer {
     }
 
     private void rollbackStartup() {
+        stopping = true; running = false;
         try { if (server != null) server.stop(); } catch (Exception e) { Msg.warn(this, "Startup rollback: " + e.getMessage()); }
         if (headlessBackend != null) headlessBackend.shutdown();
         if (projectBackend != null) projectBackend.shutdownHeadlessPrograms();
         server = null; headlessBackend = null; projectBackend = null; running = false;
+        stopping = false;
     }
 
     /**
@@ -119,6 +126,10 @@ public class GhidrAssistMCPHeadlessServer {
         if (!running && server == null && headlessBackend == null && projectBackend == null) {
             return;
         }
+        stopping = true;
+        running = false;
+        if (headlessBackend != null) headlessBackend.beginShutdown();
+        if (projectBackend != null) projectBackend.beginShutdown();
         try {
             if (server != null) {
                 server.stop();
@@ -136,6 +147,7 @@ public class GhidrAssistMCPHeadlessServer {
         headlessBackend = null;
         projectBackend = null;
         running = false;
+        stopping = false;
 
         synchronized (lock) {
             instance = null;
@@ -145,11 +157,28 @@ public class GhidrAssistMCPHeadlessServer {
     public boolean isRunning() {
         return running;
     }
+    public boolean isStopping() { return stopping; }
+
+    /** Keep the caller-owned project in scope until every worker has actually settled. */
+    public void stopAndAwaitWorkers() {
+        boolean interrupted = Thread.interrupted();
+        try {
+            for (;;) {
+                try { stop(); return; }
+                catch (IllegalStateException e) {
+                    Msg.warn(this, "Shutdown is still draining; retaining caller-owned project: " + e.getMessage());
+                    interrupted |= Thread.interrupted();
+                    try { Thread.sleep(100); } catch (InterruptedException ignored) { interrupted = true; }
+                }
+            }
+        } finally { if (interrupted) Thread.currentThread().interrupt(); }
+    }
 
     /**
      * Update the program reference (e.g., when processing a new binary).
      */
-    public void setProgram(Program program) {
+    public synchronized void setProgram(Program program) {
+        if (stopping) throw new IllegalStateException("Headless server is stopping");
         if (headlessBackend != null) {
             headlessBackend.setProgram(program);
         }
@@ -162,7 +191,7 @@ public class GhidrAssistMCPHeadlessServer {
      * A thin wrapper around GhidrAssistMCPBackend that provides a direct program
      * reference instead of going through GhidrAssistMCPManager.
      */
-    private static class HeadlessBackend extends GhidrAssistMCPBackend {
+    static class HeadlessBackend extends GhidrAssistMCPBackend {
 
         private volatile Program currentProgram;
         private final Object programConsumer = new Object();
@@ -178,9 +207,11 @@ public class GhidrAssistMCPHeadlessServer {
         @Override public Project getProject() { return null; }
 
         synchronized void setProgram(Program program) {
+            if (isStopping()) throw new IllegalStateException("Headless backend is stopping");
             Program oldProgram = this.currentProgram;
             if (oldProgram == program) return;
-            if (program != null && !program.isClosed()) program.addConsumer(programConsumer);
+            if (program != null && (program.isClosed() || !program.addConsumer(programConsumer)))
+                throw new IllegalStateException("Headless target program is closed");
             if (oldProgram != null) {
                 onProgramDeactivated(oldProgram);
                 releaseProgram(oldProgram);
@@ -192,7 +223,7 @@ public class GhidrAssistMCPHeadlessServer {
         }
 
         @Override
-        public Program getCurrentProgram() {
+        public synchronized Program getCurrentProgram() {
             if (currentProgram != null && currentProgram.isClosed()) {
                 Msg.warn(this, "Headless current program is closed; clearing program reference");
                 currentProgram = null;
@@ -209,13 +240,15 @@ public class GhidrAssistMCPHeadlessServer {
             return Collections.emptyList();
         }
 
-        synchronized void shutdown() {
-            getTaskManager().shutdown();
-            Program program = currentProgram;
-            currentProgram = null;
-            if (program != null) {
-                onProgramDeactivated(program);
-                releaseProgram(program);
+        void shutdown() {
+            shutdownWorkers();
+            synchronized (this) {
+                Program program = currentProgram;
+                currentProgram = null;
+                if (program != null) {
+                    onProgramDeactivated(program);
+                    releaseProgram(program);
+                }
             }
         }
 

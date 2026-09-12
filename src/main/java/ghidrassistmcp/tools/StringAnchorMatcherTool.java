@@ -52,8 +52,8 @@ public class StringAnchorMatcherTool implements McpTool {
     public McpSchema.JsonSchema getInputSchema() {
         return new McpSchema.JsonSchema("object",
             Map.of(
-                "source_program", Map.of("type", "string", "description", "Name of the source program (with known symbols)"),
-                "target_program", Map.of("type", "string", "description", "Name of the target program to match against"),
+                "source_program", Map.of("type", "string", "description", "Exact source name, project path, URL or program_id; ambiguous names fail"),
+                "target_program", Map.of("type", "string", "description", "Exact target name, project path, URL or program_id; ambiguous names fail"),
                 "min_string_length", Map.of("type", "integer", "description", "Minimum string length to consider (default 6)", "default", 6),
                 "limit", Map.of("type", "integer", "description", "Maximum number of matches to return (default 500)", "default", 500)
             ),
@@ -62,7 +62,7 @@ public class StringAnchorMatcherTool implements McpTool {
 
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
-        return McpSchema.CallToolResult.builder()
+        return McpSchema.CallToolResult.builder().isError(true)
             .addTextContent("This tool requires backend context for multi-program access.")
             .build();
     }
@@ -70,7 +70,7 @@ public class StringAnchorMatcherTool implements McpTool {
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram, GhidrAssistMCPBackend backend) {
         if (backend == null) {
-            return McpSchema.CallToolResult.builder()
+            return McpSchema.CallToolResult.builder().isError(true)
                 .addTextContent("Backend context not available")
                 .build();
         }
@@ -85,19 +85,9 @@ public class StringAnchorMatcherTool implements McpTool {
         if (arguments.get("limit") instanceof Number)
             limit = ((Number) arguments.get("limit")).intValue();
 
-        Program sourceProgram = findProgram(backend, sourceProgramName);
-        Program targetProgram = findProgram(backend, targetProgramName);
-
-        if (sourceProgram == null) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Source program not found: " + sourceProgramName)
-                .build();
-        }
-        if (targetProgram == null) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Target program not found: " + targetProgramName)
-                .build();
-        }
+        try (var sourceLease = ProgramSelection.lease(backend, sourceProgramName, currentProgram);
+             var targetLease = ProgramSelection.lease(backend, targetProgramName, currentProgram)) {
+        Program sourceProgram = sourceLease.program(), targetProgram = targetLease.program();
 
         // Step 1: Build string-to-function map for source program
         Map<String, List<FuncRef>> sourceStringMap = buildStringFunctionMap(sourceProgram, minStringLength);
@@ -172,6 +162,7 @@ public class StringAnchorMatcherTool implements McpTool {
         return McpSchema.CallToolResult.builder()
             .addTextContent(result.toString())
             .build();
+        } catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
     }
 
     /**
@@ -227,13 +218,6 @@ public class StringAnchorMatcherTool implements McpTool {
             if (refs.size() == 1) count++;
         }
         return count;
-    }
-
-    private Program findProgram(GhidrAssistMCPBackend backend, String name) {
-        for (Program p : backend.getAllOpenPrograms()) {
-            if (p.getName().equals(name)) return p;
-        }
-        return null;
     }
 
     private static String truncate(String s, int max) {

@@ -59,7 +59,7 @@ public class GetFunctionInfoTool implements McpTool {
     }
     
     private String getFunctionInfo(Program program, String functionName) {
-        var function = FunctionLookup.findByName(program, functionName);
+        var function = FunctionLookup.resolve(program, functionName);
         if (function == null) {
             return "Function not found: " + functionName;
         }

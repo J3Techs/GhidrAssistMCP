@@ -32,7 +32,7 @@ class BsimComparisonTest {
     }
 
     @Test
-    void comparesTwoFunctionsWithoutDatabase() throws Exception {
+    void comparesTwoFunctionsWithoutDatabase(@org.junit.jupiter.api.io.TempDir java.nio.file.Path temporary) throws Exception {
         var language = DefaultLanguageService.getLanguageService().getLanguage(new LanguageID("x86:LE:32:default"));
         Program program = new ProgramDB("comparison", language, language.getDefaultCompilerSpec(), CONSUMER);
         try {
@@ -56,7 +56,7 @@ class BsimComparisonTest {
                 program.getFunctionManager().createFunction("different", third, new AddressSet(third, third.add(3)), SourceType.USER_DEFINED);
                 program.endTransaction(tx, true);
             } catch (Exception e) { program.endTransaction(tx, false); throw e; }
-            BsimContext context = new BsimContext(program, null, null, java.nio.file.Files.createTempDirectory("bsim-compare"), null);
+            try (BsimContext context = new BsimContext(program, null, null, temporary, null)) {
             BsimOperation compare = BsimQueryOperations.operations().stream()
                 .filter(operation -> operation.name().equals("compare_functions")).findFirst().orElseThrow();
             Map<String, Object> equal = compare.handler().execute(context,
@@ -65,6 +65,7 @@ class BsimComparisonTest {
             Map<String, Object> unequal = compare.handler().execute(context,
                 Map.of("left", "1000", "right", "1080"), TaskMonitor.DUMMY);
             assertTrue(((Number) unequal.get("similarity")).doubleValue() < 0.99, unequal::toString);
+            }
         } finally { program.release(CONSUMER); }
     }
 }

@@ -12,7 +12,11 @@ import java.util.Objects;
  * @param projectPath the program's path in the Ghidra project
  * @param fileId the Ghidra domain file identifier
  */
-public record McpProgramContext(String programName, String projectPath, String fileId) {
+public record McpProgramContext(String programName, String projectPath, String fileId, String programId) {
+
+    public McpProgramContext(String programName, String projectPath, String fileId) {
+        this(programName, projectPath, fileId, null);
+    }
 
     private static final McpProgramContext EMPTY = new McpProgramContext(null, null, null);
 
@@ -20,6 +24,7 @@ public record McpProgramContext(String programName, String projectPath, String f
         programName = normalize(programName);
         projectPath = normalize(projectPath);
         fileId = normalize(fileId);
+        programId = normalize(programId);
     }
 
     /**
@@ -30,7 +35,7 @@ public record McpProgramContext(String programName, String projectPath, String f
     }
 
     public boolean hasProgram() {
-        return programName != null || projectPath != null || fileId != null;
+        return programName != null || projectPath != null || fileId != null || programId != null;
     }
 
     public String displayName() {
@@ -49,6 +54,9 @@ public record McpProgramContext(String programName, String projectPath, String f
     public boolean identifiesSameProgram(McpProgramContext other) {
         if (!hasProgram() || other == null || !other.hasProgram()) {
             return false;
+        }
+        if (programId != null && other.programId != null) {
+            return programId.equals(other.programId);
         }
         if (fileId != null && other.fileId != null) {
             return fileId.equals(other.fileId);

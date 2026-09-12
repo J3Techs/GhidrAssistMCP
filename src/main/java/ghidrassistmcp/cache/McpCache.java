@@ -22,16 +22,22 @@ public class McpCache {
 
     private static final int DEFAULT_MAX_ENTRIES = 1000;
     private static final long DEFAULT_MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes
+    private static final long DEFAULT_MAX_BYTES = 32L * 1024 * 1024;
+    private static final long DEFAULT_MAX_ENTRY_BYTES = 1024 * 1024;
 
     private final Map<String, CacheEntry> cache = new ConcurrentHashMap<>();
     private final int maxEntries;
     private final long maxAgeMs;
+    private final long maxBytes;
+    private final long maxEntryBytes;
+    private long serializedBytes;
     private final ObjectMapper objectMapper = new ObjectMapper()
         .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
 
     private final AtomicLong hitCount = new AtomicLong(0);
     private final AtomicLong missCount = new AtomicLong(0);
     private final AtomicLong evictionCount = new AtomicLong(0);
+    private final AtomicLong rejectedCount = new AtomicLong(0);
 
     /**
      * Create a cache with default settings
@@ -44,8 +50,17 @@ public class McpCache {
      * Create a cache with specified settings
      */
     public McpCache(int maxEntries, long maxAgeMs) {
+        this(maxEntries, maxAgeMs, DEFAULT_MAX_BYTES, DEFAULT_MAX_ENTRY_BYTES);
+    }
+
+    /** Serialized byte budgets bound admission; they are not exact JVM heap measurements. */
+    public McpCache(int maxEntries, long maxAgeMs, long maxBytes, long maxEntryBytes) {
+        if (maxEntries <= 0 || maxAgeMs < 0 || maxBytes <= 0 || maxEntryBytes <= 0)
+            throw new IllegalArgumentException("Cache capacities must be positive and maxAgeMs nonnegative");
         this.maxEntries = maxEntries;
         this.maxAgeMs = maxAgeMs;
+        this.maxBytes = maxBytes;
+        this.maxEntryBytes = Math.min(maxBytes, maxEntryBytes);
         Msg.info(this, "McpCache initialized with maxEntries=" + maxEntries + ", maxAgeMs=" + maxAgeMs);
     }
 
@@ -74,7 +89,7 @@ public class McpCache {
      * @param program The current program (for validation)
      * @return The cached result or null if not found/invalid
      */
-    public McpSchema.CallToolResult get(String key, Program program) {
+    public synchronized McpSchema.CallToolResult get(String key, Program program) {
         CacheEntry entry = cache.get(key);
 
         if (entry == null) {
@@ -88,7 +103,7 @@ public class McpCache {
 
         if (!entry.isValid(programName, modNum)) {
             // Invalidate stale entry
-            cache.remove(key);
+            serializedBytes -= cache.remove(key).getSerializedBytes();
             evictionCount.incrementAndGet();
             missCount.incrementAndGet();
             Msg.debug(this, "Cache entry invalidated (program modified): " + key);
@@ -97,7 +112,7 @@ public class McpCache {
 
         // Check age
         if (entry.getAgeMillis() > maxAgeMs) {
-            cache.remove(key);
+            serializedBytes -= cache.remove(key).getSerializedBytes();
             evictionCount.incrementAndGet();
             missCount.incrementAndGet();
             Msg.debug(this, "Cache entry expired: " + key);
@@ -121,27 +136,40 @@ public class McpCache {
             program != null ? program.getModificationNumber() : 0);
     }
 
-    public void put(String key, McpSchema.CallToolResult result, String programName, long modNum) {
+    public synchronized void put(String key, McpSchema.CallToolResult result, String programName, long modNum) {
         if (result == null || Boolean.TRUE.equals(result.isError())) return;
-        // Enforce size limit
-        if (cache.size() >= maxEntries) {
+        long bytes;
+        try {
+            bytes = (long) objectMapper.writeValueAsBytes(result).length
+                + key.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        } catch (JsonProcessingException e) {
+            rejectedCount.incrementAndGet();
+            return;
+        }
+        if (bytes > maxEntryBytes) { rejectedCount.incrementAndGet(); return; }
+        CacheEntry previous = cache.remove(key);
+        if (previous != null) serializedBytes -= previous.getSerializedBytes();
+        // Serialize admission so simultaneous workers cannot exceed either budget.
+        while (cache.size() >= maxEntries || serializedBytes + bytes > maxBytes) {
             evictOldest();
         }
 
-        CacheEntry entry = new CacheEntry(key, result, programName, modNum);
+        CacheEntry entry = new CacheEntry(key, result, programName, modNum, bytes);
         cache.put(key, entry);
+        serializedBytes += bytes;
         Msg.debug(this, "Cache put: " + key);
     }
 
     /**
      * Invalidate all entries for a specific program
      */
-    public void invalidateProgram(String programName) {
+    public synchronized void invalidateProgram(String programName) {
         int removed = 0;
         var iterator = cache.entrySet().iterator();
         while (iterator.hasNext()) {
             var entry = iterator.next();
             if (entry.getValue().getProgramName().equals(programName)) {
+                serializedBytes -= entry.getValue().getSerializedBytes();
                 iterator.remove();
                 removed++;
             }
@@ -155,9 +183,10 @@ public class McpCache {
     /**
      * Clear the entire cache
      */
-    public void clear() {
+    public synchronized void clear() {
         int size = cache.size();
         cache.clear();
+        serializedBytes = 0;
         evictionCount.addAndGet(size);
         Msg.info(this, "Cache cleared, removed " + size + " entries");
     }
@@ -177,7 +206,7 @@ public class McpCache {
             .toList();
 
         for (var entry : entries) {
-            cache.remove(entry.getKey());
+            serializedBytes -= cache.remove(entry.getKey()).getSerializedBytes();
             evicted++;
         }
 
@@ -188,15 +217,18 @@ public class McpCache {
     /**
      * Get cache statistics
      */
-    public String getStats() {
+    public synchronized String getStats() {
         long hits = hitCount.get();
         long misses = missCount.get();
         long total = hits + misses;
         double hitRate = total > 0 ? (double) hits / total * 100 : 0;
 
-        return String.format("Cache Stats: size=%d, hits=%d, misses=%d, hitRate=%.1f%%, evictions=%d",
-            cache.size(), hits, misses, hitRate, evictionCount.get());
+        return String.format("Cache Stats: size=%d, hits=%d, misses=%d, hitRate=%.1f%%, evictions=%d, serializedBytes=%d/%d, rejected=%d",
+            cache.size(), hits, misses, hitRate, evictionCount.get(), serializedBytes, maxBytes, rejectedCount.get());
     }
+
+    public synchronized long getSerializedBytes() { return serializedBytes; }
+    public long getRejectedCount() { return rejectedCount.get(); }
 
     /**
      * Get the current cache size

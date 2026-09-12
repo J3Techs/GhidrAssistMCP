@@ -26,12 +26,16 @@ import ghidra.util.Msg;
  */
 public class GhidrAssistMCPManager {
 
-    private static GhidrAssistMCPManager instance;
+    private static volatile GhidrAssistMCPManager instance;
     private static final Object lock = new Object();
 
     private final GhidrAssistMCPBackend backend;
     private GhidrAssistMCPServer server;
     private GhidrAssistMCPProvider provider;
+    private final Map<PluginTool, GhidrAssistMCPPlugin> plugins = new java.util.IdentityHashMap<>();
+    private final Map<PluginTool, GhidrAssistMCPProvider> providers = new java.util.IdentityHashMap<>();
+    private volatile boolean stopping;
+    private volatile java.util.concurrent.CompletableFuture<Void> termination = new java.util.concurrent.CompletableFuture<>();
 
     // Track all registered plugin tools
     private final List<PluginTool> registeredTools = new CopyOnWriteArrayList<>();
@@ -51,9 +55,13 @@ public class GhidrAssistMCPManager {
      * Private constructor for singleton pattern.
      */
     private GhidrAssistMCPManager() {
+        this(new GhidrAssistMCPBackend());
+    }
+
+    GhidrAssistMCPManager(GhidrAssistMCPBackend backend) {
         Msg.info(this, "Initializing GhidrAssistMCP Manager (singleton)");
-        backend = new GhidrAssistMCPBackend();
-        backend.setManager(this);
+        this.backend = backend;
+        this.backend.setManager(this);
     }
 
     /**
@@ -79,6 +87,7 @@ public class GhidrAssistMCPManager {
      * @return true if this is the first registration (server owner)
      */
     public synchronized boolean registerTool(PluginTool tool, GhidrAssistMCPProvider pluginProvider) {
+        if (stopping) throw new IllegalStateException("Previous MCP backend is still stopping; wait for its workers before reopening MCP");
         if (tool == null) {
             Msg.warn(this, "Attempted to register null tool");
             return false;
@@ -120,6 +129,7 @@ public class GhidrAssistMCPManager {
      * Called by the server owner plugin after creating its provider.
      */
     public synchronized void setProvider(GhidrAssistMCPProvider newProvider) {
+        if (stopping) return;
         if (newProvider == null) {
             Msg.warn(this, "Attempted to set null provider");
             return;
@@ -147,12 +157,25 @@ public class GhidrAssistMCPManager {
      *
      * @param tool The PluginTool to unregister
      */
-    public synchronized void unregisterTool(PluginTool tool) {
+    public void unregisterTool(PluginTool tool) {
+        synchronized (this) {
         if (tool == null) {
             return;
         }
 
         boolean removed = registeredTools.remove(tool);
+        if (!removed) return;
+        plugins.remove(tool);
+        GhidrAssistMCPProvider removedProvider = providers.remove(tool);
+        if (activeTool == tool) activeTool = registeredTools.isEmpty() ? null : registeredTools.getFirst();
+        if (activePlugin != null && activePlugin.getTool() == tool) activePlugin = plugins.get(activeTool);
+        if (provider == removedProvider || registeredTools.isEmpty()) {
+            if (provider != null) backend.removeEventListener(provider);
+            provider = providers.get(activeTool);
+            if (provider == null && !providers.isEmpty()) provider = providers.values().iterator().next();
+            if (provider != null) backend.addEventListener(provider);
+            if (server != null) server.setProvider(provider);
+        }
         if (removed) {
             Msg.info(this, "Unregistered tool: " + tool.getName() + " (remaining: " + registeredTools.size() + ")");
 
@@ -161,27 +184,56 @@ public class GhidrAssistMCPManager {
             }
         }
 
-        // Stop server when all tools are unregistered
-        if (registeredTools.isEmpty()) {
-            Msg.info(this, "All tools unregistered, stopping server");
-            stopServer();
-
-            // Clean up singleton for potential restart
-            synchronized (lock) {
-                if (provider != null) {
-                    backend.removeEventListener(provider);
-                    provider = null;
-                }
-                instance = null;
-            }
         }
+        shutdownIfUnused();
+    }
+
+    /** Atomically close admission; never wait for workers while holding the manager monitor. */
+    void shutdownIfUnused() {
+        GhidrAssistMCPServer stoppingServer;
+        synchronized (this) {
+            if (stopping || !registeredTools.isEmpty()) return;
+            stopping = true;
+            activeTool = null; activePlugin = null;
+            backend.beginShutdown();
+            stoppingServer = server; server = null;
+        }
+        drainOutsideUi(stoppingServer);
+    }
+
+    public synchronized void registerPlugin(GhidrAssistMCPPlugin plugin, GhidrAssistMCPProvider pluginProvider) {
+        if (stopping || !registeredTools.contains(plugin.getTool())) return;
+        plugins.put(plugin.getTool(), plugin);
+        providers.put(plugin.getTool(), pluginProvider);
+    }
+
+    public boolean isStopping() { return stopping; }
+    public java.util.concurrent.CompletableFuture<Void> termination() { return termination; }
+
+    private void drainOutsideUi(GhidrAssistMCPServer oldServer) {
+        Thread drain = new Thread(() -> {
+            if (oldServer != null) try { oldServer.stop(); }
+                catch (Exception e) { Msg.warn(this, "Transport stop failed while draining MCP: " + e.getMessage()); }
+            for (;;) {
+                try { backend.shutdownWorkers(); break; }
+                catch (IllegalStateException e) {
+                    Msg.warn(this, "MCP shutdown still draining; retaining backend: " + e.getMessage());
+                    Thread.interrupted();
+                    try { Thread.sleep(100); } catch (InterruptedException ignored) { }
+                }
+            }
+            synchronized (lock) { if (instance == this) instance = null; }
+            termination.complete(null);
+        }, "MCP-GUI-Shutdown");
+        drain.setDaemon(true);
+        drain.start();
     }
 
     /**
      * Get all programs from all registered tools.
      * This is the key method that enables multi-window support.
      */
-    public List<Program> getAllOpenPrograms() {
+    public synchronized List<Program> getAllOpenPrograms() {
         List<Program> allPrograms = new ArrayList<>();
 
         for (PluginTool tool : registeredTools) {
@@ -208,6 +260,7 @@ public class GhidrAssistMCPManager {
     public synchronized void setActiveTool(PluginTool tool) {
         if (registeredTools.contains(tool)) {
             activeTool = tool;
+            activePlugin = plugins.get(tool);
             Msg.info(this, "Active tool changed: " + tool.getName());
 
             if (provider != null) {
@@ -233,7 +286,7 @@ public class GhidrAssistMCPManager {
      * Get the CodeBrowser tool that owns the requested program. Prefer the active tool when the
      * same program is open in more than one window so its current UI options take precedence.
      */
-    public PluginTool getToolForProgram(Program program) {
+    public synchronized PluginTool getToolForProgram(Program program) {
         if (program == null) {
             return null;
         }
@@ -275,7 +328,7 @@ public class GhidrAssistMCPManager {
      * This provides access to UI context like current address and function.
      */
     public synchronized void setActivePlugin(GhidrAssistMCPPlugin plugin) {
-        this.activePlugin = plugin;
+        if (!stopping && plugin != null && registeredTools.contains(plugin.getTool())) this.activePlugin = plugin;
     }
 
     /**
@@ -289,7 +342,7 @@ public class GhidrAssistMCPManager {
      * Get the currently active program across all tools.
      * Prioritizes the program from the most recently focused tool.
      */
-    public Program getCurrentProgram() {
+    public synchronized Program getCurrentProgram() {
         // First, try the active tool if one is set
         if (activeTool != null) {
             ProgramManager pm = activeTool.getService(ProgramManager.class);
@@ -487,6 +540,7 @@ public class GhidrAssistMCPManager {
      * Start the MCP server.
      */
     private void startServer() {
+        if (stopping) return;
         if (!serverEnabled) {
             if (provider != null) {
                 provider.logSession("Server disabled - not starting");

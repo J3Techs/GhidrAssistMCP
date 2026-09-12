@@ -290,10 +290,11 @@ public class ImportFileTool implements McpTool {
         return program[0];
     }
 
-    private static void applyBaseAddress(Program program, String baseAddrStr) {
+    static void applyBaseAddress(Program program, String baseAddrStr) {
         if (baseAddrStr == null || baseAddrStr.isBlank()) {
             return;
         }
+        if (program.getCurrentTransactionInfo() != null) throw new IllegalStateException("Program has an active transaction");
         int txId = program.startTransaction("Set Image Base");
         try {
             long addrValue = parseHex(baseAddrStr);
@@ -303,8 +304,7 @@ public class ImportFileTool implements McpTool {
             program.endTransaction(txId, true);
         } catch (Exception e) {
             program.endTransaction(txId, false);
-            Msg.warn(ImportFileTool.class, "Failed to set image base to " +
-                baseAddrStr + ": " + e.getMessage());
+            throw new IllegalArgumentException("Failed to set image base to " + baseAddrStr + ": " + e.getMessage(), e);
         }
     }
 
@@ -343,7 +343,7 @@ public class ImportFileTool implements McpTool {
     }
 
     private static McpSchema.CallToolResult textResult(String message) {
-        return McpSchema.CallToolResult.builder()
+        return McpSchema.CallToolResult.builder().isError(true)
             .addTextContent(message)
             .build();
     }

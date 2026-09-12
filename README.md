@@ -1,5 +1,7 @@
 # GhidrAssistMCP
 
+Current repair and installation evidence: [Grok review repairs](docs/GROK_REPAIR_AND_INSTALL_2026-09-11.md), [deployment policy](docs/DEPLOYMENT_TRUST.md).
+
 A powerful Ghidra extension that provides an MCP (Model Context Protocol) server, enabling AI assistants and other tools to interact with Ghidra's reverse engineering capabilities through a standardized API.
 
 ## Overview
@@ -8,6 +10,7 @@ GhidrAssistMCP bridges the gap between AI-powered analysis tools and Ghidra's co
 
 ### Key Features
 
+- **Modern MCP and Codex integration**: SDK 2.0.1, Jetty 12.1, schema validation, truthful resource templates, runtime capabilities and bounded task waiting. See the [modernization report](docs/MODERNIZATION_2026-09-11.md), [Codex integration](docs/CODEX_INTEGRATION.md), and the [complete tool catalog review](docs/TOOL_CATALOG_AUDIT.md).
 - **Persistent headless projects**: Keep multiple program databases open across MCP requests without CodeBrowser. See [headless operation](docs/HEADLESS.md).
 - **Native Version Tracking and analysis**: Session/correlator/selected-markup tools, staged C/header imports, ProgramDiff and Function ID. See [VT](docs/VT.md), [native analysis](docs/NATIVE_ANALYSIS.md), and [project workflows](docs/WORKFLOWS.md).
 - **Native BSim workflows**: 32 database, corpus, query, reviewed-match, and persistent-job tools. See [BSim tools](docs/BSIM.md).
@@ -130,13 +133,13 @@ export GHIDRA_USER_EXTENSIONS_DIR="$HOME/.config/ghidra/ghidra_12.1_PUBLIC/Exten
 export GHIDRASSISTMCP_EXT="$GHIDRA_USER_EXTENSIONS_DIR/GhidrAssistMCP"
 ```
 
-Import a binary and start the MCP server as a headless pre-script:
+Import and analyze a binary, then start the MCP server as a headless post-script:
 
 ```bash
 "$GHIDRA_INSTALL_DIR/support/analyzeHeadless" /tmp/ghidra-projects McpHeadless \
   -import /path/to/binary \
   -scriptPath "$GHIDRASSISTMCP_EXT/ghidra_scripts" \
-  -preScript GAMCPStartServerScript.java "host=127.0.0.1" "port=8080"
+  -postScript GAMCPStartServerScript.java "host=127.0.0.1" "port=8080"
 ```
 
 For a binary that is already imported into the project, use `-process` instead:
@@ -145,7 +148,7 @@ For a binary that is already imported into the project, use `-process` instead:
 "$GHIDRA_INSTALL_DIR/support/analyzeHeadless" /tmp/ghidra-projects McpHeadless \
   -process binary_name \
   -scriptPath "$GHIDRASSISTMCP_EXT/ghidra_scripts" \
-  -preScript GAMCPStartServerScript.java "host=127.0.0.1" "port=8080"
+  -postScript GAMCPStartServerScript.java "host=127.0.0.1" "port=8080"
 ```
 
 To keep a headless MCP session open after analysis completes, run the server as a post-script with wait mode:
@@ -180,7 +183,7 @@ Successful sync and async queries share the result cache. Results are cached onl
 when the target program revision and relevant options stay unchanged during the
 operation. Active-window context is added afresh when a result is returned.
 
-The headless MCP server runs inside the `analyzeHeadless` JVM and uses the loaded `currentProgram`. The server holds a program consumer while it is running so MCP requests do not race against program database closure. Use `wait=true` when you want `analyzeHeadless` to stay open for interactive MCP clients. A harness can also pass `completion_file=/workspace/control/session.complete`; creating that file closes the MCP server cleanly and lets Ghidra save and exit normally.
+The headless MCP server runs inside the `analyzeHeadless` JVM and uses the loaded `currentProgram`. The server holds a program consumer while it is running so MCP requests do not race against program database closure. The launcher defaults to `wait=true` and rejects `wait=false`: it must keep the caller-owned project in scope until all workers stop. A harness can also pass `completion_file=/workspace/control/session.complete`; creating that file closes the MCP server cleanly and lets Ghidra save and exit normally.
 
 Disposable static-analysis labs may pass `tool_profile=agent_lab`. This enables sandbox-local program export while arbitrary path import and Ghidra scripts remain disabled because they can expose process secrets or spawn processes. The harness owns artifact imports. Unknown profiles are rejected.
 

@@ -141,21 +141,21 @@ final class AnalysisUtils {
 
     static String runAnalysis(Program program, String mode, AddressSetView restrictSet,
                               Map<String, Object> optionOverrides, TaskMonitor monitor) {
-        TaskMonitor activeMonitor = monitor != null ? monitor : TaskMonitor.DUMMY;
-        activeMonitor.setMessage("Applying analysis options");
-        List<String> optionErrors = applyAnalysisOptions(program, optionOverrides);
-        if (!optionErrors.isEmpty()) {
-            return "Analysis option errors:\n- " + String.join("\n- ", optionErrors);
-        }
-
         String normalizedMode = normalizeMode(mode);
+        if (MODE_CHANGES.equals(normalizedMode) && restrictSet != null && !restrictSet.isEmpty())
+            throw new IllegalArgumentException("mode 'changes' cannot be restricted to an address range. Use mode 'full'.");
+        TaskMonitor activeMonitor = monitor != null ? monitor : TaskMonitor.DUMMY;
+        if (activeMonitor.isCancelled() || Thread.currentThread().isInterrupted())
+            throw new java.util.concurrent.CancellationException("Analysis cancelled before applying options or scheduling work");
         AutoAnalysisManager manager = getManager(program);
+        if (manager.isAnalyzing()) throw new IllegalStateException("Analysis is already active; wait before applying per-call options.");
+        return withTemporaryOptions(program, optionOverrides, () -> {
         long start = System.currentTimeMillis();
-
+        try {
         activeMonitor.setMessage("Starting analysis");
         if (MODE_CHANGES.equals(normalizedMode)) {
             if (restrictSet != null && !restrictSet.isEmpty()) {
-                return "mode 'changes' cannot be restricted to an address range. Use mode 'full'.";
+                throw new IllegalArgumentException("mode 'changes' cannot be restricted to an address range. Use mode 'full'.");
             }
             manager.startAnalysis(activeMonitor);
         } else {
@@ -165,6 +165,19 @@ final class AnalysisUtils {
 
         activeMonitor.setMessage("Waiting for analysis");
         manager.waitForAnalysis(null, activeMonitor);
+        } finally {
+            // A cancelled waiter does not prove native analysis has stopped. Keep ownership
+            // and temporary settings until the actual analysis thread is finished.
+            boolean interrupted = Thread.interrupted();
+            while (manager.isAnalyzing()) {
+                if (activeMonitor.isCancelled() || interrupted) manager.cancelQueuedTasks();
+                try { Thread.sleep(25); }
+                catch (InterruptedException e) { interrupted = true; activeMonitor.cancel(); }
+            }
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+        if (activeMonitor.isCancelled() || Thread.currentThread().isInterrupted())
+            throw new java.util.concurrent.CancellationException("Analysis cancelled; temporary options restored after execution stopped.");
         long elapsed = System.currentTimeMillis() - start;
 
         StringBuilder sb = new StringBuilder();
@@ -182,13 +195,44 @@ final class AnalysisUtils {
         sb.append("  Analyzed Flag: ").append(isAnalyzed(program)).append("\n");
         sb.append("  Should Ask To Analyze: ").append(shouldAskToAnalyze(program));
         return sb.toString();
+        });
+    }
+
+    /** Restore original typed values even if execution fails; persistent setters remain separate. */
+    static <T> T withTemporaryOptions(Program program, Map<String, Object> overrides,
+            java.util.function.Supplier<T> operation) {
+        if (overrides == null || overrides.isEmpty()) return operation.get();
+        Options options = getAnalysisOptions(program);
+        Map<String, Object> originals = new LinkedHashMap<>();
+        java.util.Set<String> defaults = new java.util.HashSet<>();
+        for (String name : overrides.keySet()) {
+            if (!options.contains(name)) throw new IllegalArgumentException("Analysis option not found: " + name);
+            Object value = options.getObject(name, null);
+            if (options.isDefaultValue(name)) defaults.add(name);
+            else if (value == null) throw new IllegalArgumentException("Cannot temporarily override null-valued option: " + name);
+            originals.put(name, value instanceof byte[] bytes ? bytes.clone() : value instanceof Date date ? new Date(date.getTime()) : value);
+        }
+        List<String> errors = applyAnalysisOptions(program, overrides);
+        if (!errors.isEmpty()) throw new IllegalArgumentException("Analysis option errors: " + String.join("; ", errors));
+        try { return operation.get(); }
+        finally {
+            int tx = program.startTransaction("Restore temporary analysis options");
+            boolean commit = false;
+            try {
+                for (var entry : originals.entrySet()) {
+                    if (defaults.contains(entry.getKey())) options.restoreDefaultValue(entry.getKey());
+                    else options.putObject(entry.getKey(), entry.getValue());
+                }
+                commit = true;
+            } finally { program.endTransaction(tx, commit); }
+        }
     }
 
     static String normalizeMode(String mode) {
         if (mode == null || mode.isBlank()) {
             return MODE_FULL;
         }
-        String normalized = mode.trim().toLowerCase();
+        String normalized = mode.trim().toLowerCase(java.util.Locale.ROOT);
         if (MODE_FULL.equals(normalized) || MODE_CHANGES.equals(normalized)) {
             return normalized;
         }

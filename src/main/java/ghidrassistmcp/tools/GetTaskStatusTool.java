@@ -39,16 +39,18 @@ public class GetTaskStatusTool implements McpTool {
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
         return McpSchema.CallToolResult.builder()
+            .isError(true)
             .addTextContent("Task status requires backend reference. Use execute with backend parameter.")
             .build();
     }
 
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram, GhidrAssistMCPBackend backend) {
-        String taskId = (String) arguments.get("task_id");
+        String taskId = arguments.get("task_id") instanceof String id ? id : null;
 
         if (taskId == null || taskId.trim().isEmpty()) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("task_id parameter is required")
                 .build();
         }
@@ -56,6 +58,7 @@ public class GetTaskStatusTool implements McpTool {
         var taskManager = backend.getTaskManager();
         if (taskManager == null) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("Task manager not available")
                 .build();
         }
@@ -63,6 +66,7 @@ public class GetTaskStatusTool implements McpTool {
         McpTask task = taskManager.getTask(taskId);
         if (task == null) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("Task not found: " + taskId)
                 .build();
         }
@@ -74,6 +78,7 @@ public class GetTaskStatusTool implements McpTool {
 
         // Otherwise return status summary
         return McpSchema.CallToolResult.builder()
+            .isError(task.getStatus() == McpTask.Status.FAILED || task.getStatus() == McpTask.Status.CANCELLED)
             .addTextContent(task.toSummary())
             .build();
     }

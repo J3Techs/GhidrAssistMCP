@@ -7,6 +7,8 @@ import io.modelcontextprotocol.spec.McpSchema;
 import java.util.*;
 
 public class ReadMemoryBatchTool implements McpTool {
+  @Override public Map<String, Object> getOutputSchema() { return BatchResultSchemas.memory(); }
+
   public String getName() {
     return "read_memory_batch";
   }
@@ -23,17 +25,18 @@ public class ReadMemoryBatchTool implements McpTool {
             Map.of(
                 "type",
                 "array",
+                "minItems", 1, "maxItems", 1000,
                 "items",
                 Map.of(
                     "type",
                     "object",
                     "properties",
                     Map.of(
-                        "address", Map.of("type", "string"), "length", Map.of("type", "integer")),
+                        "address", Map.of("type", "string"), "length", Map.of("type", "integer", "minimum", 1, "maximum", 65536)),
                     "required",
                     List.of("address"))),
             "length",
-            Map.of("type", "integer"),
+            Map.of("type", "integer", "minimum", 0, "maximum", 65536, "default", 16),
             "type",
             Map.of(
                 "type",
@@ -87,6 +90,7 @@ public class ReadMemoryBatchTool implements McpTool {
         }
         out.add(row);
       }
+      boolean truncated = out.stream().anyMatch(value -> Boolean.TRUE.equals(((Map<?, ?>) value).get("truncated")));
       return ProjectToolSupport.result(
           Map.of(
               "results",
@@ -98,7 +102,7 @@ public class ReadMemoryBatchTool implements McpTool {
               "errors",
               errors,
               "truncated",
-              false));
+              truncated, "partial", errors > 0 || truncated), errors == out.size());
     } catch (Exception e) {
       return ProjectToolSupport.error(e.getMessage());
     }

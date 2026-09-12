@@ -23,7 +23,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import ghidra.features.bsim.query.BSimClientFactory;
 import ghidra.features.bsim.query.FunctionDatabase;
 import ghidra.framework.Application;
-import ghidra.framework.client.HeadlessClientAuthenticator;
 
 /** Secret-free, atomic BSim connection profiles. */
 public final class BsimConnections {
@@ -270,6 +269,6 @@ public final class BsimConnections {
             ("file".equals(url.getProtocol()))) return;
         String user = text(arguments, "user");
         String keystore = text(arguments, "keystore");
-        HeadlessClientAuthenticator.installHeadlessClientAuthenticator(user, keystore, false);
+        BsimAuthentication.ensure(user, keystore);
     }
 }

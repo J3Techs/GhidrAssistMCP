@@ -72,6 +72,7 @@ import ghidrassistmcp.tools.ListSegmentsTool;
 import ghidrassistmcp.tools.CreateMemoryBlockTool;
 import ghidrassistmcp.tools.ListStringsTool;
 import ghidrassistmcp.tools.ListTasksTool;
+import ghidrassistmcp.tools.WaitTaskTool;
 import ghidrassistmcp.tools.ProgramInfoTool;
 import ghidrassistmcp.tools.RenameSymbolBatchTool;
 import ghidrassistmcp.tools.RenameSymbolTool;
@@ -109,6 +110,66 @@ import io.modelcontextprotocol.spec.McpSchema;
  * Works with the singleton GhidrAssistMCPManager to support multiple CodeBrowser windows.
  */
 public class GhidrAssistMCPBackend implements McpBackend {
+    private volatile boolean stopping;
+    private final Object admissionLock = new Object();
+    private final Map<Thread, Integer> activeInvocations = new java.util.IdentityHashMap<>();
+
+    /** Stop admission before draining; task controls remain available to observe shutdown. */
+    public void beginShutdown() {
+        synchronized (admissionLock) {
+            stopping = true;
+            for (Thread thread : activeInvocations.keySet()) if (thread != Thread.currentThread()) thread.interrupt();
+        }
+    }
+    public boolean isStopping() { return stopping; }
+
+    /** Lease a selected program and track prompts/resources until their actual callback exits. */
+    public <T> T withProgramRequest(Function<Program, T> callback) {
+        return withProgramRequest(this::getCurrentProgram, callback);
+    }
+
+    private <T> T withProgramRequest(java.util.function.Supplier<Program> selection, Function<Program, T> callback) {
+        synchronized (admissionLock) {
+            if (stopping) throw new IllegalStateException("MCP backend is stopping");
+            activeInvocations.merge(Thread.currentThread(), 1, Integer::sum);
+        }
+        Object consumer = new Object();
+        Program retained = null;
+        try {
+            Program program = selection.get();
+            if (program != null) {
+                if (!program.addConsumer(consumer)) throw new IllegalStateException("Target program closed before request execution");
+                retained = program;
+            }
+            return callback.apply(program);
+        } finally {
+            try {
+                if (retained != null && !retained.isClosed() && retained.isUsedBy(consumer)) retained.release(consumer);
+            } finally {
+                synchronized (admissionLock) {
+                    activeInvocations.computeIfPresent(Thread.currentThread(), (thread, count) -> count == 1 ? null : count - 1);
+                    admissionLock.notifyAll();
+                }
+            }
+        }
+    }
+    public void shutdownWorkers() {
+        beginShutdown();
+        synchronized (admissionLock) {
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(20);
+            while (!activeInvocations.isEmpty()) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) throw new IllegalStateException("Synchronous MCP calls have not stopped; consumers retained");
+                try { java.util.concurrent.TimeUnit.NANOSECONDS.timedWait(admissionLock, remaining); }
+                catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("Interrupted draining synchronous MCP calls; consumers retained", e);
+                }
+            }
+        }
+        taskManager.shutdown();
+        ghidrassistmcp.bsim.BsimRuntime.closeForBackend(this);
+    }
 
     private final Map<String, McpTool> tools = new ConcurrentHashMap<>();
     private final Map<String, String> toolAliases = new ConcurrentHashMap<>();
@@ -228,6 +289,8 @@ public class GhidrAssistMCPBackend implements McpBackend {
         registerTool(new GetTaskStatusTool());
         registerTool(new CancelTaskTool());
         registerTool(new ListTasksTool());
+        registerTool(new WaitTaskTool());
+        registerTool(new ghidrassistmcp.tools.RuntimeCapabilitiesTool());
 
         // Custom tools: memory/code manipulation, scripting, assembly
         registerTool(new CreateMemoryBlockTool());
@@ -312,7 +375,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
             // Only include enabled tools in the available tools list
             if (isToolEnabled(tool.getName())) {
                 // Augment the schema with program_name parameter for multi-program support
-                McpSchema.JsonSchema augmentedSchema = augmentSchemaWithProgramName(tool.getInputSchema());
+                Map<String, Object> augmentedSchema = augmentSchemaWithProgramName(tool.getInputSchemaMap());
 
                 // Build tool annotations based on McpTool interface methods
                 McpSchema.ToolAnnotations annotations = new McpSchema.ToolAnnotations(
@@ -324,13 +387,14 @@ public class GhidrAssistMCPBackend implements McpBackend {
                     null   // returnDirect
                 );
 
-                toolList.add(McpSchema.Tool.builder()
+                var descriptor = McpSchema.Tool.builder()
                     .name(tool.getName())
                     .title(tool.getName())
                     .description(tool.getDescription())
                     .inputSchema(augmentedSchema)
-                    .annotations(annotations)
-                    .build());
+                    .annotations(annotations);
+                if (tool.getOutputSchema() != null) descriptor.outputSchema(McpOutputSchemas.advertised(tool));
+                toolList.add(descriptor.build());
             }
         }
         // Sort tools alphabetically by name for consistent ordering
@@ -342,7 +406,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
      * Augment a tool's input schema with the universal 'program_name' parameter.
      * This allows all tools to optionally target a specific open program.
      */
-    private McpSchema.JsonSchema augmentSchemaWithProgramName(McpSchema.JsonSchema originalSchema) {
+    private Map<String, Object> augmentSchemaWithProgramName(Map<String, Object> originalSchema) {
         // Create the program_name property schema
         Map<String, Object> programNameSchema = new HashMap<>();
         programNameSchema.put("type", "string");
@@ -354,11 +418,12 @@ public class GhidrAssistMCPBackend implements McpBackend {
             Map<String, Object> props = new HashMap<>();
             props.put("program_name", programNameSchema);
             props.put("program_id", Map.of("type", "string", "description", "Exact program_id returned by list_binaries or runtime diagnostics"));
-            return new McpSchema.JsonSchema("object", props, List.of(), null, null, null);
+            return Map.of("type", "object", "properties", props);
         }
 
         // Get original properties or empty map
-        Map<String, Object> originalProps = originalSchema.properties();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> originalProps = (Map<String, Object>) originalSchema.get("properties");
         Map<String, Object> newProps;
 
         if (originalProps != null) {
@@ -372,19 +437,31 @@ public class GhidrAssistMCPBackend implements McpBackend {
         newProps.put("program_id", Map.of("type", "string", "description", "Exact program_id returned by list_binaries or runtime diagnostics"));
 
         // Return new schema with augmented properties
-        return new McpSchema.JsonSchema(
-            originalSchema.type(),
-            newProps,
-            originalSchema.required(),
-            originalSchema.additionalProperties(),
-            originalSchema.defs(),
-            originalSchema.definitions()
-        );
+        Map<String, Object> augmented = new java.util.LinkedHashMap<>(originalSchema);
+        augmented.put("properties", newProps);
+        return augmented;
     }
     
     @Override
     public McpSchema.CallToolResult callTool(String toolName, Map<String, Object> arguments) {
-        McpTool tool = tools.get(toolName);
+        boolean control = toolName != null && List.of("wait_task", "get_task_status", "cancel_task", "list_tasks").contains(toolName);
+        synchronized (admissionLock) {
+            if (stopping && !control) return McpSchema.CallToolResult.builder().isError(true)
+                .addTextContent("Backend is stopping; wait for shutdown to finish").build();
+            if (!control) activeInvocations.merge(Thread.currentThread(), 1, Integer::sum);
+        }
+        try { return callToolInternal(toolName, arguments); }
+        finally {
+            if (!control) synchronized (admissionLock) {
+                activeInvocations.computeIfPresent(Thread.currentThread(), (thread, count) -> count == 1 ? null : count - 1);
+                admissionLock.notifyAll();
+            }
+        }
+    }
+
+    private McpSchema.CallToolResult callToolInternal(String toolName, Map<String, Object> arguments) {
+        if (arguments == null) arguments = Map.of();
+        McpTool tool = toolName == null ? null : tools.get(toolName);
         if (tool == null) {
             Msg.warn(this, "Tool not found: " + toolName);
             return McpSchema.CallToolResult.builder()
@@ -402,6 +479,8 @@ public class GhidrAssistMCPBackend implements McpBackend {
                 .build();
         }
 
+        Object requestConsumer = new Object();
+        Program retainedProgram = null;
         try {
             // Freeze project selection before a task can wait behind another worker.
             if (List.of("project_files", "project_repository", "save_program", "save_project_session").contains(toolName)
@@ -417,6 +496,11 @@ public class GhidrAssistMCPBackend implements McpBackend {
 
             // Resolve the target program - check if program_name is specified
             Program targetProgram = resolveTargetProgram(arguments);
+            if (targetProgram != null) {
+                if (!targetProgram.addConsumer(requestConsumer))
+                    throw new IllegalStateException("Target program closed before request execution");
+                retainedProgram = targetProgram;
+            }
 
             // Check cache for cacheable tools
             CacheSnapshot cacheSnapshot = captureCacheSnapshot(tool, toolName, arguments, targetProgram);
@@ -437,7 +521,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
             }
 
             // Execute synchronously for normal tools
-            McpSchema.CallToolResult result = executeGuarded(tool, arguments, targetProgram, null);
+            McpSchema.CallToolResult result = McpOutputSchemas.validateCompletion(tool, executeGuarded(tool, arguments, targetProgram, null));
 
             cacheSuccessfulResult(tool, toolName, arguments, targetProgram, cacheSnapshot, result, null);
 
@@ -460,6 +544,9 @@ public class GhidrAssistMCPBackend implements McpBackend {
             notifyToolResponse(toolName, errorResult);
 
             return errorResult;
+        } finally {
+            if (retainedProgram != null && !retainedProgram.isClosed() && retainedProgram.isUsedBy(requestConsumer))
+                retainedProgram.release(requestConsumer);
         }
     }
 
@@ -469,11 +556,12 @@ public class GhidrAssistMCPBackend implements McpBackend {
     private McpSchema.CallToolResult executeToolAsync(McpTool tool, String toolName,
                                                        Map<String, Object> arguments, Program targetProgram,
                                                        CacheSnapshot cacheSnapshot) {
-        McpTask task = submitTask(toolName, arguments, targetProgram, taskContext -> {
+        Map<String, Object> submittedArguments = McpTask.freezeArguments(arguments);
+        McpTask task = submitTask(toolName, submittedArguments, targetProgram, taskContext -> {
             try {
                 McpSchema.CallToolResult result =
-                    executeGuarded(tool, arguments, targetProgram, taskContext);
-                cacheSuccessfulResult(tool, toolName, arguments, targetProgram, cacheSnapshot, result, taskContext);
+                    McpOutputSchemas.validateCompletion(tool, executeGuarded(tool, submittedArguments, targetProgram, taskContext));
+                cacheSuccessfulResult(tool, toolName, submittedArguments, targetProgram, cacheSnapshot, result, taskContext);
                 // Store the raw result, but retain context in the response shown to listeners.
                 // get_task_status decorates the stored result once using this task's snapshot.
                 notifyToolResponse(toolName,
@@ -491,8 +579,9 @@ public class GhidrAssistMCPBackend implements McpBackend {
                 "Task ID: " + task.getTaskId() + "\n" +
                 "Tool: " + toolName + "\n" +
                 "Status: " + task.getStatus() + "\n\n" +
-                "Use get_task_status with this task_id to check progress and retrieve results.\n" +
+                "Use wait_task with this task_id to wait for completion, then get_task_status to retrieve results.\n" +
                 "Use cancel_task to cancel if needed.")
+            .structuredContent(taskManager.waitForTaskSnapshot(task))
             .build();
     }
 
@@ -530,6 +619,8 @@ public class GhidrAssistMCPBackend implements McpBackend {
     public McpTask submitTask(String toolName, Map<String, Object> arguments,
                               Program targetProgram,
                               Function<McpTask, McpSchema.CallToolResult> taskExecutor) {
+        synchronized (admissionLock) {
+        if (stopping) throw new IllegalStateException("MCP backend is stopping");
         Object consumer = new Object();
         if (targetProgram != null && !targetProgram.addConsumer(consumer))
             throw new IllegalStateException("Target program closed before task submission");
@@ -538,6 +629,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
                 if (targetProgram != null && !targetProgram.isClosed() && targetProgram.isUsedBy(consumer))
                     targetProgram.release(consumer);
             });
+        }
     }
 
     /**
@@ -551,7 +643,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
         DomainFile domainFile = program.getDomainFile();
         String projectPath = domainFile != null ? domainFile.getPathname() : null;
         String fileId = domainFile != null ? domainFile.getFileID() : null;
-        return new McpProgramContext(program.getName(), projectPath, fileId);
+        return new McpProgramContext(program.getName(), projectPath, fileId, ProgramIdentity.id(program));
     }
 
     /**
@@ -632,8 +724,21 @@ public class GhidrAssistMCPBackend implements McpBackend {
      * @return The resource content
      */
     public String readResource(String uri) {
+        McpResource resource = resourceRegistry.findResource(uri);
+        if (resource == null) return null;
+        Map<String, String> parameters = resource.extractParams(uri);
+        return withProgramRequest(() -> {
         Program program = getCurrentProgram();
-        return resourceRegistry.readResource(uri, program);
+        if (parameters.containsKey("name")) {
+            // URI components are not HTML forms: a literal '+' remains a plus.
+            String selector = java.net.URLDecoder.decode(parameters.get("name").replace("+", "%2B"),
+                java.nio.charset.StandardCharsets.UTF_8);
+            var programs = new java.util.LinkedHashSet<Program>(getAllOpenPrograms());
+            if (program != null) programs.add(program);
+            program = ProgramIdentity.resolve(selector, programs);
+        }
+        return program;
+        }, program -> resource.readContent(program, parameters));
     }
 
     /**
@@ -669,7 +774,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
     @Override
     public McpSchema.ServerCapabilities getCapabilities() {
         return McpSchema.ServerCapabilities.builder()
-            .tools(true)
+            .tools(false) // Catalog updates currently restart the server; no list-changed notifications.
             .resources(false, false)  // subscribe=false, listChanged=false
             .prompts(false)           // listChanged=false
             .build();
@@ -839,7 +944,7 @@ public class GhidrAssistMCPBackend implements McpBackend {
     private McpProgramContext resolveResultProgramContext(McpTool tool,
                                                            Map<String, Object> arguments,
                                                            Program targetProgram) {
-        if (tool instanceof GetTaskStatusTool) {
+        if (tool instanceof GetTaskStatusTool || tool instanceof WaitTaskTool || tool instanceof CancelTaskTool) {
             Object taskId = arguments.get("task_id");
             if (taskId instanceof String id) {
                 McpTask task = taskManager.getTask(id);
@@ -981,10 +1086,18 @@ public class GhidrAssistMCPBackend implements McpBackend {
     private McpSchema.CallToolResult executeGuarded(McpTool tool, Map<String,Object> arguments,
             Program program, McpTask task) throws InterruptedException {
         // BSim invokes its handlers on a separate worker, which acquires this guard there.
-        boolean write = !tool.isReadOnly() && !tool.getName().startsWith("bsim_");
+        boolean write = !tool.isReadOnly() && !tool.getName().startsWith("bsim_")
+            && !(tool instanceof CancelTaskTool);
         if (write) McpMutationGuard.LOCK.lockInterruptibly();
         try { return task == null ? tool.execute(arguments, program, this) : tool.execute(arguments, program, this, task); }
         finally { if (write) McpMutationGuard.LOCK.unlock(); }
+    }
+
+    /** Report attached GUI services without creating a global manager in headless mode. */
+    public boolean hasProgramManager() {
+        var activeTool = manager == null ? null : manager.getActiveTool();
+        return !isHeadlessSession() && activeTool != null &&
+            activeTool.getService(ghidra.app.services.ProgramManager.class) != null;
     }
 
     /** Project context is supplied by the runtime, independent of CodeBrowser. */
@@ -1018,12 +1131,15 @@ public class GhidrAssistMCPBackend implements McpBackend {
     public List<McpSchema.Tool> getAllTools() {
         List<McpSchema.Tool> toolList = new ArrayList<>();
         for (McpTool tool : tools.values()) {
-            toolList.add(McpSchema.Tool.builder()
+            var descriptor = McpSchema.Tool.builder()
                 .name(tool.getName())
                 .title(tool.getName())
                 .description(tool.getDescription())
-                .inputSchema(tool.getInputSchema())
-                .build());
+                .inputSchema(augmentSchemaWithProgramName(tool.getInputSchemaMap()))
+                .annotations(new McpSchema.ToolAnnotations(null, tool.isReadOnly(), tool.isDestructive(),
+                    tool.isIdempotent(), tool.isOpenWorld(), null));
+            if (tool.getOutputSchema() != null) descriptor.outputSchema(McpOutputSchemas.advertised(tool));
+            toolList.add(descriptor.build());
         }
         // Sort tools alphabetically by name for consistent ordering
         toolList.sort((a, b) -> a.name().compareToIgnoreCase(b.name()));

@@ -22,4 +22,24 @@ class RuntimeCapabilitiesResourceTest {
         assertEquals(Boolean.valueOf(java.awt.GraphicsEnvironment.isHeadless()), report.get("headless"));
         assertNotNull(report.get("build_info"));
     }
+
+    @Test void toolAndResourceExposeTheSameCapabilitiesWithoutAdvertisingUnsupportedTasks() throws Exception {
+        var backend = new ghidrassistmcp.GhidrAssistMCPBackend();
+        try {
+            var result = new ghidrassistmcp.tools.RuntimeCapabilitiesTool().execute(Map.of(), null, backend);
+            Map<?, ?> body = (Map<?, ?>) result.structuredContent();
+            var validator = io.modelcontextprotocol.json.McpJsonDefaults.getSchemaValidator();
+            var schema = new ghidrassistmcp.tools.RuntimeCapabilitiesTool().getOutputSchema();
+            assertTrue(validator.validate(schema, body).valid());
+            var malformed = new java.util.LinkedHashMap<Object, Object>(body);
+            malformed.put("protocol", Map.of("sdk_version", "2.0.1"));
+            assertFalse(validator.validate(schema, malformed).valid());
+            Map<?, ?> resource = new ObjectMapper().readValue(new RuntimeCapabilitiesResource(() -> backend).readContent(null, Map.of()), Map.class);
+            assertEquals(resource.get("registered_tools"), body.get("registered_tools"));
+            assertEquals(backend.getAllTools().size(), body.get("registered_tools"));
+            assertEquals("2025-11-25", ((Map<?, ?>) body.get("protocol")).get("latest_supported_revision"));
+            assertEquals(false, ((Map<?, ?>) body.get("protocol")).get("tasks_extension"));
+            assertNotNull(backend.getAvailableTools().stream().filter(t -> t.name().equals("runtime_capabilities")).findFirst().orElseThrow().outputSchema());
+        } finally { backend.getTaskManager().shutdown(); }
+    }
 }

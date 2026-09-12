@@ -133,16 +133,6 @@ public class GetBasicBlocksTool implements McpTool {
     }
 
     private Function findFunction(Program program, String identifier) {
-        try {
-            Address addr = program.getAddressFactory().getAddress(identifier);
-            if (addr != null) {
-                Function func = program.getFunctionManager().getFunctionAt(addr);
-                if (func != null) return func;
-            }
-        } catch (Exception e) {
-            // Not an address
-        }
-
-        return FunctionLookup.findByName(program, identifier);
+        return FunctionLookup.resolve(program, identifier);
     }
 }

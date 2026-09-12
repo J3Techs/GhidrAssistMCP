@@ -12,6 +12,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
@@ -34,6 +35,32 @@ public class McpTaskManager {
     private final Map<String, Future<?>> taskFutures = new ConcurrentHashMap<>();
     private final Map<String, Runnable> taskCleanup = new ConcurrentHashMap<>();
     private final ExecutorService executor;
+    private final String instanceId = java.util.UUID.randomUUID().toString();
+
+    public String getInstanceId() { return instanceId; }
+
+    /** Custom tool lifecycle, scoped to this manager process; not negotiated MCP Tasks. */
+    public Map<String, Object> waitForTask(String taskId, long timeoutMillis, Long afterVersion)
+            throws InterruptedException {
+        McpTask task = getTask(taskId);
+        if (task == null) throw new IllegalArgumentException("Task not found: " + taskId);
+        Map<String, Object> snapshot = task.awaitSnapshot(timeoutMillis, afterVersion);
+        addLifecycleMetadata(snapshot);
+        return snapshot;
+    }
+
+    public Map<String, Object> waitForTaskSnapshot(McpTask task) {
+        Map<String, Object> snapshot = task.snapshot();
+        addLifecycleMetadata(snapshot);
+        return snapshot;
+    }
+
+    private void addLifecycleMetadata(Map<String, Object> snapshot) {
+        snapshot.put("schema_version", 1);
+        snapshot.put("manager_instance_id", instanceId);
+        snapshot.put("lifecycle", "custom_in_memory");
+        snapshot.put("result_tool", "get_task_status");
+    }
 
     /**
      * Create a new task manager with default thread pool size
@@ -92,17 +119,17 @@ public class McpTaskManager {
         cleanupOldTasks();
 
         McpTask task = new McpTask(toolName, arguments, programContext);
-        tasks.put(task.getTaskId(), task);
         taskCleanup.put(task.getTaskId(), cleanup);
 
-        Future<?> future;
-        try { future = executor.submit(() -> {
+        FutureTask<Void> future = new FutureTask<>(() -> {
             try {
                 if (!task.beginExecution()) { task.markCancelled(); return; }
                 Msg.info(this, "Task started: " + task.getTaskId() + " for tool: " + toolName);
 
                 McpSchema.CallToolResult result = taskExecutor.apply(task);
-                if (Boolean.TRUE.equals(result != null && result.isError())) {
+                if (result == null) {
+                    task.markFailed("Operation returned no result");
+                } else if (Boolean.TRUE.equals(result.isError())) {
                     task.markFailed("Operation returned an MCP error", result);
                 } else {
                     task.markCompleted(result);
@@ -122,9 +149,16 @@ public class McpTaskManager {
                     Msg.error(this, "Task failed: " + task.getTaskId() + " - " + e.getMessage(), e);
                 }
             } finally { releaseTask(task.getTaskId()); }
-        }); } catch (RuntimeException e) { tasks.remove(task.getTaskId()); releaseTask(task.getTaskId()); throw e; }
-
+        }, null);
+        // Publish the cancellation handle before admitting execution; a fast worker or
+        // concurrent cancellation must never observe a task without its Future.
         taskFutures.put(task.getTaskId(), future);
+        tasks.put(task.getTaskId(), task);
+        try { executor.execute(future); }
+        catch (RuntimeException e) {
+            tasks.remove(task.getTaskId()); taskFutures.remove(task.getTaskId());
+            releaseTask(task.getTaskId()); throw e;
+        }
         Msg.info(this, "Task submitted: " + task.getTaskId() + " for tool: " + toolName);
 
         return task;
@@ -242,10 +276,12 @@ public class McpTaskManager {
         long completed = tasks.values().stream().filter(t -> t.getStatus() == McpTask.Status.COMPLETED).count();
         long failed = tasks.values().stream().filter(t -> t.getStatus() == McpTask.Status.FAILED).count();
         long cancelled = tasks.values().stream().filter(t -> t.getStatus() == McpTask.Status.CANCELLED).count();
+        long cancelling = tasks.values().stream().filter(t -> t.getStatus() == McpTask.Status.CANCEL_REQUESTED).count();
 
         sb.append("Total: ").append(tasks.size()).append("\n");
         sb.append("  Pending: ").append(pending).append("\n");
         sb.append("  Running: ").append(running).append("\n");
+        sb.append("  Cancellation requested: ").append(cancelling).append("\n");
         sb.append("  Completed: ").append(completed).append("\n");
         sb.append("  Failed: ").append(failed).append("\n");
         sb.append("  Cancelled: ").append(cancelled).append("\n\n");
@@ -256,7 +292,7 @@ public class McpTaskManager {
                 .sorted((a, b) -> b.getCreatedAt().compareTo(a.getCreatedAt())) // Most recent first
                 .limit(20) // Limit to 20 most recent
                 .forEach(task -> {
-                    sb.append("  - ").append(task.getTaskId().substring(0, 8)).append("...")
+                    sb.append("  - ").append(task.getTaskId())
                       .append(" | ").append(task.getToolName())
                       .append(" | ").append(task.getStatus())
                       .append(" | ").append(task.getProgressPercent()).append("%")
@@ -295,6 +331,7 @@ public class McpTaskManager {
     public void shutdown() {
         Msg.info(this, "Shutting down McpTaskManager...");
         executor.shutdown();
+        for (McpTask task : tasks.values()) if (!task.isTerminal()) cancelTask(task.getTaskId());
         try {
             if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
                 for (McpTask task : tasks.values()) if (!task.isTerminal()) cancelTask(task.getTaskId());

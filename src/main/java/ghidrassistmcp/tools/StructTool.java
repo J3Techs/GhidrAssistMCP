@@ -149,6 +149,7 @@ public class StructTool implements McpTool {
         // We express this as a single object schema with rich per-field descriptions.
         return new McpSchema.JsonSchema("object",
             Map.ofEntries(
+                Map.entry("conflict_policy", TypeCreationSupport.schema()),
                 Map.entry("action", Map.of(
                     "type", "string",
                     "description", "Structure operation to perform",
@@ -358,6 +359,10 @@ public class StructTool implements McpTool {
                 .build();
         }
 
+        String policy;
+        try { policy = TypeCreationSupport.policy(arguments); }
+        catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
+        if (currentProgram.getCurrentTransactionInfo() != null) return ProjectToolSupport.error("Program has an active transaction");
         int txId = currentProgram.startTransaction("Create Structure");
         boolean committed = false;
         try {
@@ -365,14 +370,14 @@ public class StructTool implements McpTool {
             Structure result;
 
             if (cDefinition != null && !cDefinition.isEmpty()) {
-                result = createStructFromCDefinition(dtm, cDefinition, category);
+                result = createStructFromCDefinition(dtm, cDefinition, category, policy);
             } else {
                 int size = sizeNum != null ? sizeNum.intValue() : 0;
-                result = createEmptyStruct(dtm, name, size, category, packed != null && packed);
+                result = createEmptyStruct(dtm, name, size, category, packed != null && packed, policy);
             }
 
             if (result == null) {
-                return McpSchema.CallToolResult.builder()
+                return McpSchema.CallToolResult.builder().isError(true)
                     .addTextContent("Failed to create structure")
                     .build();
             }
@@ -387,7 +392,7 @@ public class StructTool implements McpTool {
         } catch (Exception e) {
             String msg = "Error creating structure: " + e.getMessage();
             Msg.error(this, msg, e);
-            return McpSchema.CallToolResult.builder()
+            return McpSchema.CallToolResult.builder().isError(true)
                 .addTextContent(msg)
                 .build();
         } finally {
@@ -396,7 +401,7 @@ public class StructTool implements McpTool {
     }
 
     private Structure createEmptyStruct(DataTypeManager dtm, String name, int size,
-                                        String category, boolean packed) {
+                                        String category, boolean packed, String policy) {
         CategoryPath categoryPath = category != null && !category.isEmpty()
             ? new CategoryPath(category)
             : CategoryPath.ROOT;
@@ -407,7 +412,7 @@ public class StructTool implements McpTool {
             struct.setPackingEnabled(true);
         }
 
-        DataType addedType = dtm.addDataType(struct, DataTypeConflictHandler.REPLACE_HANDLER);
+        DataType addedType = TypeCreationSupport.add(dtm, struct, policy);
 
         if (addedType instanceof Structure) {
             Msg.info(this, "Created empty structure: " + name);
@@ -418,45 +423,32 @@ public class StructTool implements McpTool {
     }
 
     private Structure createStructFromCDefinition(DataTypeManager dtm, String cDefinition,
-                                                   String category) throws Exception {
+                                                    String category, String policy) throws Exception {
         String normalizedDef = cDefinition.trim();
-        if (!normalizedDef.endsWith(";")) {
-            normalizedDef += ";";
-        }
-
-        CParser parser = new CParser(dtm);
-
-        try {
-            ByteArrayInputStream inputStream = new ByteArrayInputStream(
-                normalizedDef.getBytes(StandardCharsets.UTF_8));
-            parser.parse(inputStream);
-
-            Map<String, DataType> composites = parser.getComposites();
-
-            if (composites.isEmpty()) {
-                throw new Exception("No structure definition found in the provided C code. " +
-                    "Make sure to use format: 'struct Name { type field; ... };'");
-            }
-
-            Structure parsedStruct = selectParsedStructure(composites, null);
-
-            if (category != null && !category.isEmpty()) {
-                CategoryPath categoryPath = new CategoryPath(category);
-                parsedStruct.setCategoryPath(categoryPath);
-            }
-
-            DataType addedType = dtm.addDataType(parsedStruct, DataTypeConflictHandler.REPLACE_HANDLER);
-
-            if (addedType instanceof Structure) {
-                Msg.info(this, "Created structure from C definition: " + addedType.getName());
-                return (Structure) addedType;
-            }
-
-            return null;
-
-        } catch (ghidra.app.util.cparser.C.ParseException pe) {
-            throw new Exception("C parse error: " + pe.getMessage() +
-                ". Check your struct definition syntax.");
+        if (!normalizedDef.endsWith(";")) normalizedDef += ";";
+        // The parser may return existing types or modify composites while parsing. Neither
+        // its primary manager nor its lookup managers may reference the live program.
+        try (var staging = new ghidra.program.model.data.StandAloneDataTypeManager("MCP parsed types", dtm.getDataOrganization());
+             var lookup = new ghidra.program.model.data.StandAloneDataTypeManager("MCP type lookup", dtm.getDataOrganization())) {
+            int tx = lookup.startTransaction("Snapshot type lookup");
+            try {
+                var types = dtm.getAllDataTypes();
+                while (types.hasNext()) lookup.addDataType(types.next(), DataTypeConflictHandler.KEEP_HANDLER);
+            } finally { lookup.endTransaction(tx, true); }
+            CParser parser = new CParser(staging, false, new DataTypeManager[] {lookup});
+            int stagedTx = staging.startTransaction("Parse isolated structure");
+            try {
+                parser.parse(new ByteArrayInputStream(normalizedDef.getBytes(StandardCharsets.UTF_8)));
+                Map<String, DataType> composites = parser.getComposites();
+                if (composites.isEmpty()) throw new IllegalArgumentException("No structure definition found");
+                Structure parsed = selectParsedStructure(composites, null);
+                // Copy before changing category in case the parser returned a lookup type.
+                parsed = (Structure) parsed.copy(staging);
+                if (category != null && !category.isEmpty()) parsed.setCategoryPath(new CategoryPath(category));
+                DataType added = TypeCreationSupport.add(dtm, parsed, policy);
+                if (!(added instanceof Structure result)) throw new IllegalArgumentException("Parsed type is not a structure");
+                return result;
+            } finally { staging.endTransaction(stagedTx, false); }
         }
     }
 

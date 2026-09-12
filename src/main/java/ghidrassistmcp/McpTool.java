@@ -29,6 +29,16 @@ public interface McpTool {
      */
     McpSchema.JsonSchema getInputSchema();
 
+    /** Override to use arbitrary JSON Schema keywords supported by the MCP SDK. */
+    default Map<String, Object> getInputSchemaMap() {
+        return McpSchemas.fromLegacy(getInputSchema());
+    }
+
+    /** Optional JSON Schema for successful completed results; the backend adds async submission. */
+    default Map<String, Object> getOutputSchema() {
+        return null;
+    }
+
     /**
      * Execute the tool with given arguments and current program context
      */

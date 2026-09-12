@@ -28,6 +28,6 @@ Tests include:
 
 No production Ghidra project, shared repository, installed third-party FID collection or remote BSim database was changed by validation. Live shared-repository checkout/check-in/merge and remote PostgreSQL/Elasticsearch remain environment-dependent. FrontEnd metadata save is explicitly unverified because the native API exposes no durable success signal.
 
-Headless operation holds databases open across requests with `wait=true`; the compatibility default is `wait=false`. Explicitly save before shutdown. Generic task history is not durable; BSim jobs have their own journal. Native UI edits/analysis should be idle during VT/type transactions. Header input limits exclude transitive include expansion and native parser memory. See [HEADLESS.md](HEADLESS.md), [VT.md](VT.md), [NATIVE_ANALYSIS.md](NATIVE_ANALYSIS.md) and [WORKFLOWS.md](WORKFLOWS.md).
+The headless launcher holds its caller-owned project with `wait=true` by default and rejects `wait=false`. Explicitly save before shutdown. Generic task history is not durable; BSim jobs have their own journal. Native UI edits/analysis should be idle during VT/type transactions. Header input limits exclude transitive include expansion and native parser memory. See [HEADLESS.md](HEADLESS.md), [VT.md](VT.md), [NATIVE_ANALYSIS.md](NATIVE_ANALYSIS.md) and [WORKFLOWS.md](WORKFLOWS.md).
 
 The built extension is packaged for installation; building and synchronizing this repository does not replace a plugin already loaded in a running Ghidra JVM.

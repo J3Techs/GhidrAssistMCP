@@ -36,9 +36,9 @@ public class ListStringsTool implements McpTool {
     public McpSchema.JsonSchema getInputSchema() {
         return new McpSchema.JsonSchema("object", 
             Map.of(
-                "offset", new McpSchema.JsonSchema("integer", null, null, null, null, null),
-                "limit", new McpSchema.JsonSchema("integer", null, null, null, null, null),
-                "min_length", new McpSchema.JsonSchema("integer", null, null, null, null, null),
+                "offset", QueryPageBounds.offsetSchema(),
+                "limit", QueryPageBounds.limitSchema(),
+                "min_length", Map.of("type", "integer", "minimum", 0, "maximum", Integer.MAX_VALUE, "default", 4),
                 "filter", new McpSchema.JsonSchema("string", null, null, null, null, null)
             ),
             List.of(), null, null, null);
@@ -48,6 +48,7 @@ public class ListStringsTool implements McpTool {
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
         if (currentProgram == null) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("No program currently loaded")
                 .build();
         }
@@ -58,14 +59,14 @@ public class ListStringsTool implements McpTool {
         int minLength = 4; // Default minimum string length
         String filter = null;
         
-        if (arguments.get("offset") instanceof Number) {
-            offset = ((Number) arguments.get("offset")).intValue();
-        }
-        if (arguments.get("limit") instanceof Number) {
-            limit = ((Number) arguments.get("limit")).intValue();
-        }
-        if (arguments.get("min_length") instanceof Number) {
-            minLength = ((Number) arguments.get("min_length")).intValue();
+        try {
+            offset = QueryPageBounds.integer(arguments, "offset", 0, 0, Integer.MAX_VALUE);
+            limit = QueryPageBounds.integer(arguments, "limit", 100, 1, QueryPageBounds.MAX_LIMIT);
+            minLength = QueryPageBounds.integer(arguments, "min_length", 4, 0, Integer.MAX_VALUE);
+            if (arguments.containsKey("filter") && !(arguments.get("filter") instanceof String))
+                throw new IllegalArgumentException("filter must be a string");
+        } catch (IllegalArgumentException e) {
+            return McpSchema.CallToolResult.builder().isError(true).addTextContent(e.getMessage()).build();
         }
         if (arguments.get("filter") instanceof String) {
             filter = ((String) arguments.get("filter")).trim();
@@ -87,6 +88,9 @@ public class ListStringsTool implements McpTool {
         int totalCount = 0;
         
         while (dataIter.hasNext()) {
+            if (Thread.currentThread().isInterrupted()) {
+                return McpSchema.CallToolResult.builder().isError(true).addTextContent("String listing interrupted").build();
+            }
             Data data = dataIter.next();
             
             // Check if this is string data

@@ -65,12 +65,14 @@ public class XrefsTool implements McpTool {
                 )),
                 Map.entry("depth", Map.of(
                     "type", "integer",
+                    "minimum", 0, "maximum", 5,
                     "description", "Optional: max call graph depth when include_calls is true (default 2, max 5)",
                     "default", 2
                 )),
                 Map.entry("limit", Map.of(
                     "type", "integer",
-                    "description", "Maximum number of references to return (default 100)"
+                    "minimum", 1, "maximum", QueryPageBounds.MAX_LIMIT,
+                    "description", "Maximum references per direction; aggregate row budget for call graphs (default 100, max 1000)"
                 ))
             ),
             List.of(), null, null, null);
@@ -80,18 +82,19 @@ public class XrefsTool implements McpTool {
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
         if (currentProgram == null) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("No program currently loaded")
+                .isError(true).addTextContent("No program currently loaded")
                 .build();
         }
 
         String addressStr = (String) arguments.get("address");
         String functionName = (String) arguments.get("function");
         String direction = (String) arguments.get("direction");
-        int limit = 100;
-
-        if (arguments.get("limit") instanceof Number) {
-            limit = ((Number) arguments.get("limit")).intValue();
-        }
+        final int limit;
+        final int depth;
+        try {
+            limit = QueryPageBounds.integer(arguments, "limit", 100, 1, QueryPageBounds.MAX_LIMIT);
+            depth = QueryPageBounds.integer(arguments, "depth", 2, 0, 5);
+        } catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
 
         if (direction == null || direction.isEmpty()) {
             direction = "both";
@@ -100,31 +103,27 @@ public class XrefsTool implements McpTool {
 
         if (!direction.equals("to") && !direction.equals("from") && !direction.equals("both")) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Invalid direction. Use 'to', 'from', or 'both'")
+                .isError(true).addTextContent("Invalid direction. Use 'to', 'from', or 'both'")
                 .build();
         }
 
         // Check that at least one of address or function is provided
         if ((addressStr == null || addressStr.isEmpty()) && (functionName == null || functionName.isEmpty())) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Either 'address' or 'function' parameter is required")
+                .isError(true).addTextContent("Either 'address' or 'function' parameter is required")
                 .build();
         }
 
         // Check for call graph mode
         boolean includeCalls = false;
-        int depth = 2;
         if (arguments.get("include_calls") instanceof Boolean) {
             includeCalls = (Boolean) arguments.get("include_calls");
-        }
-        if (arguments.get("depth") instanceof Number) {
-            depth = Math.min(((Number) arguments.get("depth")).intValue(), 5);
         }
 
         // If function is provided, use function-based xrefs
         if (functionName != null && !functionName.isEmpty()) {
             if (includeCalls) {
-                return getCallGraph(currentProgram, functionName, direction, depth);
+                return getCallGraph(currentProgram, functionName, direction, depth, limit);
             }
             return getFunctionXrefs(currentProgram, functionName, direction, limit);
         }
@@ -143,16 +142,16 @@ public class XrefsTool implements McpTool {
             address = program.getAddressFactory().getAddress(addressStr);
             if (address == null) {
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("Invalid address: " + addressStr)
+                    .isError(true).addTextContent("Invalid address: " + addressStr)
                     .build();
             }
         } catch (Exception e) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Error parsing address: " + e.getMessage())
+                .isError(true).addTextContent("Error parsing address: " + e.getMessage())
                 .build();
         }
 
-        StringBuilder result = new StringBuilder();
+        BoundedQueryText result = new BoundedQueryText();
         result.append("Cross-references for ").append(addressStr).append(":\n\n");
 
         // Get references TO this address
@@ -161,7 +160,7 @@ public class XrefsTool implements McpTool {
             ReferenceIterator refsTo = program.getReferenceManager().getReferencesTo(address);
             int count = 0;
 
-            while (refsTo.hasNext() && count < limit) {
+            while (refsTo.hasNext() && count < limit && !result.full()) {
                 Reference ref = refsTo.next();
                 result.append("  - From: ").append(ref.getFromAddress())
                       .append(" (").append(ref.getReferenceType()).append(")\n");
@@ -170,7 +169,7 @@ public class XrefsTool implements McpTool {
 
             if (count == 0) {
                 result.append("  No references found.\n");
-            } else if (count >= limit) {
+            } else if (refsTo.hasNext() || result.full()) {
                 result.append("  ... (limited to ").append(limit).append(" results)\n");
             }
             result.append("\n");
@@ -183,7 +182,7 @@ public class XrefsTool implements McpTool {
             int count = 0;
 
             for (Reference ref : refsFrom) {
-                if (count >= limit) break;
+                if (count >= limit || result.full()) break;
                 result.append("  - To: ").append(ref.getToAddress())
                       .append(" (").append(ref.getReferenceType()).append(")\n");
                 count++;
@@ -191,7 +190,7 @@ public class XrefsTool implements McpTool {
 
             if (count == 0) {
                 result.append("  No references found.\n");
-            } else if (count >= limit) {
+            } else if (count < refsFrom.length || result.full()) {
                 result.append("  ... (limited to ").append(limit).append(" results)\n");
             }
         }
@@ -209,11 +208,11 @@ public class XrefsTool implements McpTool {
         Function function = findFunctionByName(program, functionName);
         if (function == null) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Function not found: " + functionName)
+                .isError(true).addTextContent("Function not found: " + functionName)
                 .build();
         }
 
-        StringBuilder result = new StringBuilder();
+        BoundedQueryText result = new BoundedQueryText();
         result.append("Cross-references for function: ").append(functionName).append("\n");
         result.append("Entry Point: ").append(function.getEntryPoint()).append("\n\n");
 
@@ -223,10 +222,10 @@ public class XrefsTool implements McpTool {
         // Get XREFs TO the function (callers)
         if (direction.equals("to") || direction.equals("both")) {
             result.append("## References TO function (callers):\n");
-            Set<Function> callingFunctions = function.getCallingFunctions(null);
+            Set<Function> callingFunctions = function.getCallingFunctions(TaskMonitor.DUMMY);
 
             for (Function callerFunc : callingFunctions) {
-                if (count >= limit) {
+                if (count >= limit || result.full()) {
                     break;
                 }
 
@@ -238,7 +237,7 @@ public class XrefsTool implements McpTool {
 
             if (callingFunctions.isEmpty()) {
                 result.append("  No callers found.\n");
-            } else if (count >= limit) {
+            } else if (count < callingFunctions.size() || result.full()) {
                 result.append("  ... (limited to ").append(limit).append(" results)\n");
             }
             result.append("\n");
@@ -247,11 +246,11 @@ public class XrefsTool implements McpTool {
         // Get XREFs FROM the function (callees)
         if (direction.equals("from") || direction.equals("both")) {
             result.append("## References FROM function (callees):\n");
-            Set<Function> calledFunctions = function.getCalledFunctions(null);
+            Set<Function> calledFunctions = function.getCalledFunctions(TaskMonitor.DUMMY);
 
             int calleeCount = 0;
             for (Function calledFunc : calledFunctions) {
-                if (calleeCount >= limit) {
+                if (calleeCount >= limit || result.full()) {
                     break;
                 }
 
@@ -263,7 +262,7 @@ public class XrefsTool implements McpTool {
 
             if (calledFunctions.isEmpty()) {
                 result.append("  No called functions found.\n");
-            } else if (calleeCount >= limit) {
+            } else if (calleeCount < calledFunctions.size() || result.full()) {
                 result.append("  ... (limited to ").append(limit).append(" results)\n");
             }
         }
@@ -281,101 +280,17 @@ public class XrefsTool implements McpTool {
      * Get call graph for a function with recursive depth traversal.
      * Absorbs functionality from the former GetCallGraphTool.
      */
-    private McpSchema.CallToolResult getCallGraph(Program program, String functionName, String direction, int depth) {
-        Function function = findFunctionByName(program, functionName);
-        if (function == null) {
-            // Try as address
-            try {
-                Address addr = program.getAddressFactory().getAddress(functionName);
-                if (addr != null) {
-                    function = program.getFunctionManager().getFunctionAt(addr);
-                }
-            } catch (Exception e) {
-                // Not an address
-            }
-        }
-        if (function == null) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Function not found: " + functionName)
-                .build();
-        }
-
-        StringBuilder result = new StringBuilder();
-        result.append("Call Graph for: ").append(function.getName(true))
-              .append(" @ ").append(function.getEntryPoint()).append("\n\n");
-
-        Set<String> visited = new HashSet<>();
-
-        if (direction.equals("to") || direction.equals("both")) {
-            result.append("## Calling Functions (Who calls this):\n");
-            buildCallerTree(function, depth, 0, visited, result);
-            result.append("\n");
-        }
-
-        visited.clear();
-
-        if (direction.equals("from") || direction.equals("both")) {
-            result.append("## Called Functions (What this calls):\n");
-            buildCalleeTree(function, depth, 0, visited, result);
-        }
-
-        return McpSchema.CallToolResult.builder()
-            .addTextContent(result.toString())
-            .build();
-    }
-
-    private void buildCallerTree(Function function, int maxDepth, int currentDepth,
-                                  Set<String> visited, StringBuilder result) {
-        String indent = "  ".repeat(currentDepth);
-        String key = function.getEntryPoint().toString();
-
-        if (visited.contains(key)) {
-            result.append(indent).append("- ").append(function.getName(true))
-                  .append(" @ ").append(function.getEntryPoint())
-                  .append(" (recursive/already visited)\n");
-            return;
-        }
-
-        visited.add(key);
-        result.append(indent).append("- ").append(function.getName(true))
-              .append(" @ ").append(function.getEntryPoint()).append("\n");
-
-        if (currentDepth < maxDepth) {
-            Set<Function> callers = function.getCallingFunctions(TaskMonitor.DUMMY);
-            for (Function caller : callers) {
-                buildCallerTree(caller, maxDepth, currentDepth + 1, visited, result);
-            }
-        }
-    }
-
-    private void buildCalleeTree(Function function, int maxDepth, int currentDepth,
-                                  Set<String> visited, StringBuilder result) {
-        String indent = "  ".repeat(currentDepth);
-        String key = function.getEntryPoint().toString();
-
-        if (visited.contains(key)) {
-            result.append(indent).append("- ").append(function.getName(true))
-                  .append(" @ ").append(function.getEntryPoint())
-                  .append(" (recursive/already visited)\n");
-            return;
-        }
-
-        visited.add(key);
-        result.append(indent).append("- ").append(function.getName(true))
-              .append(" @ ").append(function.getEntryPoint()).append("\n");
-
-        if (currentDepth < maxDepth) {
-            Set<Function> callees = function.getCalledFunctions(TaskMonitor.DUMMY);
-            for (Function callee : callees) {
-                buildCalleeTree(callee, maxDepth, currentDepth + 1, visited, result);
-            }
-        }
+    private McpSchema.CallToolResult getCallGraph(Program program, String functionName, String direction, int depth, int limit) {
+        Function function = FunctionLookup.resolve(program, functionName);
+        if (function == null) return ProjectToolSupport.error("Function not found: " + functionName);
+        return McpSchema.CallToolResult.builder().addTextContent(GetCallGraphTool.render(function, depth,
+            direction.equals("to") ? "callers" : direction.equals("from") ? "callees" : "both", limit)).build();
     }
 
     /**
      * Find a function by name.
      */
     private Function findFunctionByName(Program program, String functionName) {
-        return FunctionLookup.findByName(program, functionName);
+        return FunctionLookup.resolve(program, functionName);
     }
 }

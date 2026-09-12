@@ -49,19 +49,44 @@ repositories {
 
 dependencies {
 	// MCP SDK core dependency
-	implementation 'io.modelcontextprotocol.sdk:mcp:0.17.1'
+	implementation platform('io.modelcontextprotocol.sdk:mcp-bom:2.0.1')
+	implementation 'io.modelcontextprotocol.sdk:mcp-core'
+	implementation 'io.modelcontextprotocol.sdk:mcp-json-jackson2'
 	
 	// Jetty embedded server for servlet container
-	implementation 'org.eclipse.jetty:jetty-server:11.0.20'
-	implementation 'org.eclipse.jetty:jetty-servlet:11.0.20'
+	implementation 'org.eclipse.jetty:jetty-server:12.1.13'
+	implementation 'org.eclipse.jetty.ee10:jetty-ee10-servlet:12.1.13'
 	
 	// Jackson for JSON processing (required by MCP)
-	implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.3'
-	implementation 'com.fasterxml.jackson.core:jackson-core:2.18.3'
-	implementation 'com.fasterxml.jackson.core:jackson-annotations:2.18.3'
+	implementation platform('com.fasterxml.jackson:jackson-bom:2.21.1')
+	implementation 'com.fasterxml.jackson.core:jackson-databind'
+	implementation 'com.fasterxml.jackson.core:jackson-core'
+	implementation 'com.fasterxml.jackson.core:jackson-annotations'
 
 	testImplementation 'org.junit.jupiter:junit-jupiter:6.1.0'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher:6.1.0'
+}
+
+// Ghidra's helper stages dependencies into lib/ and also adds lib/*.jar back to
+// the classpath. After an upgrade that retains obsolete SDK/Jackson jars. Resolve
+// Maven dependencies once and package a synchronized, generated directory instead.
+def legacyLibraryRoot = file('lib').canonicalFile.toPath()
+configurations.api.dependencies.removeAll { dependency ->
+    dependency instanceof org.gradle.api.artifacts.FileCollectionDependency &&
+        dependency.files.files.any { it.canonicalFile.toPath().startsWith(legacyLibraryRoot) }
+}
+tasks.named('copyDependencies') { enabled = false }
+def runtimeLibraries = tasks.register('stageRuntimeLibraries', Sync) {
+    from(configurations.runtimeClasspath.filter { library ->
+        !library.canonicalFile.toPath().startsWith(file(ghidraInstallDir).canonicalFile.toPath()) &&
+        !library.canonicalFile.toPath().startsWith(legacyLibraryRoot)
+    })
+    into layout.buildDirectory.dir('dependency-libs')
+}
+tasks.named('buildExtension') {
+    dependsOn runtimeLibraries
+    exclude 'lib/**'
+    from(runtimeLibraries) { into "${project.name}/lib" }
 }
 
 tasks.named('test') {

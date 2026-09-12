@@ -146,6 +146,12 @@ class BsimMatchOperationsTest {
             context = new BsimContext(program, null, new BsimConnections(root.resolve("settings")), root, null);
         }
         Address address(String value) { return program.getAddressFactory().getAddress(value); }
-        void close() { if (!program.isClosed()) program.release(CONSUMER); project.close(); }
+        void close() {
+            try { context.close(); }
+            finally {
+                try { if (!program.isClosed()) program.release(CONSUMER); }
+                finally { project.close(); }
+            }
+        }
     }
 }

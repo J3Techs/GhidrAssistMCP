@@ -7,13 +7,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import ghidra.app.services.ProgramManager;
 import ghidra.framework.model.Project;
 import ghidra.feature.vt.api.util.VTAbstractProgramCorrelatorFactory;
 import ghidra.util.classfinder.ClassSearcher;
 import ghidra.program.model.listing.Program;
 import ghidrassistmcp.GhidrAssistMCPBackend;
-import ghidrassistmcp.GhidrAssistMCPManager;
 import ghidrassistmcp.ProgramIdentity;
 
 /** Read-only runtime prerequisites and capability report; performs no remote probes. */
@@ -32,7 +30,14 @@ public final class RuntimeCapabilitiesResource implements McpResource {
     @Override public Map<String,String> extractParams(String uri) { return Map.of(); }
 
     @Override public String readContent(Program ignored, Map<String,String> params) {
+        try { return mapper.writeValueAsString(snapshot()); }
+        catch (Exception e) { return "{\"error\":\"Unable to serialize runtime capabilities\"}"; }
+    }
+
+    /** Shared tool/resource representation; construction never connects to a remote backend. */
+    public Map<String, Object> snapshot() {
         Map<String,Object> out = new LinkedHashMap<>();
+        out.put("schema_version", 1);
         out.put("resource", URI);
         GhidrAssistMCPBackend backend = backendSupplier.get();
         boolean headless = backend != null ? backend.isHeadlessSession() : GraphicsEnvironment.isHeadless();
@@ -40,22 +45,27 @@ public final class RuntimeCapabilitiesResource implements McpResource {
         out.put("headless", headless);
         out.put("ghidra_version", safeGhidraVersion());
         out.put("build_info", buildInfo());
-        GhidrAssistMCPManager manager = GhidrAssistMCPManager.getInstance();
         Map<String,Boolean> states = backend == null ? Map.of() : backend.getToolEnabledStates();
         out.put("registered_tools", states.size());
+        out.put("enabled_tools", states.values().stream().filter(Boolean.TRUE::equals).count());
+        out.put("protocol", Map.of("sdk_version", "2.0.1", "latest_supported_revision", "2025-11-25",
+            "supported_revisions", List.of("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"),
+            "stateless_2026_07_28", false, "tasks_extension", false,
+            "application_task_api", List.of("wait_task", "get_task_status", "list_tasks", "cancel_task")));
+        out.put("async_enabled", backend != null && backend.isAsyncExecutionEnabled());
         out.put("disabled_tools", states.entrySet().stream().filter(e -> !Boolean.TRUE.equals(e.getValue())).map(Map.Entry::getKey).sorted().toList());
         Program active = backend == null ? null : backend.getCurrentProgram();
         Project project = backend == null ? null : backend.getProject();
         out.put("active_project", project == null ? null : String.valueOf(project.getProjectLocator()));
         out.put("headless_session", backend != null && backend.isHeadlessSession());
-        out.put("program_manager_available", backend != null && !backend.isHeadlessSession() && manager.getActiveTool() != null && manager.getActiveTool().getService(ProgramManager.class) != null);
+        out.put("program_manager_available", backend != null && backend.hasProgramManager());
         out.put("open_programs", backend == null ? List.of() : backend.getAllOpenPrograms().stream().map(ProgramIdentity::describe).toList());
         out.put("active_program", active == null ? null : ProgramIdentity.describe(active));
         out.put("native_version_tracking", Map.of("available", classPresent("ghidra.feature.vt.api.main.VTSession"), "correlators", correlatorNames()));
         out.put("bsim", Map.of("api_available", classPresent("ghidra.features.bsim.query.BSimServerInfo"), "backend_validation", "not verified by this read-only resource"));
         out.put("tasks", Map.of("generic", Map.of("durable", false, "restart_recovery", "generic task records are lost on JVM restart; inspect saved databases before retrying"), "bsim", Map.of("durable_journal", true, "backend_health", "not probed")));
         out.put("unavailable_reasons", List.of("Repository, BSim server, credentials, and remote database health are intentionally not probed; GUI cursor/FrontEnd services are unavailable in headless mode."));
-        try { return mapper.writeValueAsString(out); } catch (Exception e) { return "{\"error\":\"Unable to serialize runtime capabilities\"}"; }
+        return out;
     }
 
     private boolean classPresent(String name) { try { Class.forName(name, false, getClass().getClassLoader()); return true; } catch (Throwable e) { return false; } }

@@ -96,32 +96,44 @@ public class AnalyzeProgramTool implements McpTool {
                                                     GhidrAssistMCPBackend backend, McpTask task) {
         List<Program> programs = resolvePrograms(arguments, currentProgram, backend);
         if (programs.isEmpty()) {
-            return textResult("No program currently loaded.");
+            return errorResult("No program currently loaded.");
         }
 
         String mode = (String) arguments.get("mode");
         Map<String, Object> options = AnalysisUtils.objectMap(arguments.get("options"));
+        if (arguments.containsKey("options") && options == null) return errorResult("options must be an object");
         String startAddress = (String) arguments.get("start_address");
         String endAddress = (String) arguments.get("end_address");
 
         if (programs.size() > 1 &&
             ((startAddress != null && !startAddress.isBlank()) || (endAddress != null && !endAddress.isBlank()))) {
-            return textResult("Address range analysis is only supported for a single target program.");
+            return errorResult("Address range analysis is only supported for a single target program.");
         }
 
         StringBuilder sb = new StringBuilder();
         sb.append("Auto Analysis Results\n\n");
         int total = programs.size();
+        boolean failed = false;
         for (int i = 0; i < total; i++) {
             Program program = programs.get(i);
             TaskMonitor monitor = monitorForProgram(task, program, i, total);
+            if (monitor.isCancelled() || Thread.currentThread().isInterrupted()) {
+                failed = true;
+                sb.append("Analysis cancelled; remaining programs were not started.\n");
+                break;
+            }
             try {
                 publishProgramProgress(task, program, i, total, "Preparing");
                 AddressSet range = AnalysisUtils.parseRange(program, startAddress, endAddress);
                 sb.append(AnalysisUtils.runAnalysis(program, mode, range, options, monitor));
                 sb.append("\n\n");
                 publishProgramProgress(task, program, i, total, "Completed");
+            } catch (java.util.concurrent.CancellationException e) {
+                failed = true;
+                sb.append("Analysis cancelled; remaining programs were not started.\n");
+                break;
             } catch (Exception e) {
+                failed = true;
                 Msg.error(this, "Analysis failed for " + program.getName(), e);
                 sb.append("Analysis failed for ").append(program.getName()).append(": ")
                   .append(e.getMessage()).append("\n\n");
@@ -131,7 +143,7 @@ public class AnalyzeProgramTool implements McpTool {
         if (backend != null) {
             backend.clearCache();
         }
-        return textResult(sb.toString().trim());
+        return failed ? errorResult(sb.toString().trim()) : textResult(sb.toString().trim());
     }
 
     private TaskMonitor monitorForProgram(McpTask task, Program program, int index, int total) {
@@ -180,5 +192,8 @@ public class AnalyzeProgramTool implements McpTool {
         return McpSchema.CallToolResult.builder()
             .addTextContent(message)
             .build();
+    }
+    private McpSchema.CallToolResult errorResult(String message) {
+        return McpSchema.CallToolResult.builder().isError(true).addTextContent(message).build();
     }
 }

@@ -45,7 +45,7 @@ class AsyncTaskContextTest {
 
         assertEquals(McpTask.Status.COMPLETED, task.getStatus());
         assertEquals(new McpProgramContext(
-            "program-a", "/binaries/program-a", "file-a"), task.getProgramContext());
+            "program-a", "/binaries/program-a", "file-a", ProgramIdentity.id(originalProgram)), task.getProgramContext());
         assertFalse(text(task.getResult()).contains("[Context]"),
             "task manager should retain the raw tool result");
 
@@ -91,6 +91,8 @@ class AsyncTaskContextTest {
                 case "getName" -> name;
                 case "getPathname" -> projectPath;
                 case "getFileID" -> fileId;
+                case "getLocalProjectURL", "getSharedProjectURL", "getProjectLocator" -> null;
+                case "getVersion" -> 1;
                 case "equals" -> proxy == args[0];
                 case "hashCode" -> System.identityHashCode(proxy);
                 case "toString" -> "FakeDomainFile[" + projectPath + "]";

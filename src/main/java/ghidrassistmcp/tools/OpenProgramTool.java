@@ -136,7 +136,9 @@ public class OpenProgramTool implements McpTool {
         List<DomainFile> files = new ArrayList<>();
 
         if (folderPath != null && !folderPath.isBlank() && !"/".equals(folderPath)) {
-            DomainFolder folder = rootFolder.getFolder(folderPath.replaceFirst("^/", ""));
+            DomainFolder folder;
+            try { folder = ProjectToolSupport.folder(rootFolder, folderPath); }
+            catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
             if (folder == null) {
                 return ProjectToolSupport.error("Folder not found: " + folderPath);
             }

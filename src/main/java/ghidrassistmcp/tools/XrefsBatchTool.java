@@ -9,6 +9,8 @@ import java.util.*;
 import ghidra.util.task.TaskMonitor;
 
 public class XrefsBatchTool implements McpTool {
+  @Override public Map<String, Object> getOutputSchema() { return BatchResultSchemas.xrefs(); }
+
   public String getName() {
     return "xrefs_batch";
   }
@@ -22,13 +24,13 @@ public class XrefsBatchTool implements McpTool {
         "object",
         Map.of(
             "addresses",
-            Map.of("type", "array", "items", Map.of("type", "string")),
+            Map.of("type", "array", "minItems", 1, "maxItems", 1000, "items", Map.of("type", "string", "minLength", 1)),
             "direction",
             Map.of("type", "string", "enum", List.of("to", "from", "both"), "default", "both"),
             "per_address_limit",
-            Map.of("type", "integer", "default", 100),
+            Map.of("type", "integer", "minimum", 0, "maximum", 1000, "default", 100),
             "reference_kind", Map.of("type", "string", "enum", List.of("all", "call", "jump", "data", "read", "write", "indirect", "flow")),
-            "operand_index", Map.of("type", "integer", "minimum", -1),
+            "operand_index", Map.of("type", "integer", "minimum", -1, "maximum", 255),
             "external_only", Map.of("type", "boolean", "default", false),
             "max_scanned", Map.of("type", "integer", "minimum", 1, "maximum", 100000, "default", 10000)),
         List.of("addresses"),
@@ -98,9 +100,10 @@ public class XrefsBatchTool implements McpTool {
         }
         rows.add(row);
       }
+      boolean truncated = rows.stream().anyMatch(row -> Boolean.TRUE.equals(((Map<?, ?>) row).get("truncated")));
       return ProjectToolSupport.result(
           Map.of("results", rows, "count", rows.size(), "errors", errors, "scanned", scanned[0], "scan_limit", scanLimit, "truncated",
-              rows.stream().anyMatch(row -> Boolean.TRUE.equals(((Map<?, ?>) row).get("truncated")))));
+              truncated, "partial", errors > 0 || truncated), errors == rows.size());
     } catch (Exception e) {
       return ProjectToolSupport.error(e.getMessage());
     }

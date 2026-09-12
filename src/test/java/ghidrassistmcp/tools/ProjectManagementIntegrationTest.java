@@ -51,6 +51,28 @@ class ProjectManagementIntegrationTest {
     }
 
     @Test
+    void openProgramListsNestedProjectFolders() throws Exception {
+        var nested = project.getProjectData().getRootFolder().createFolder("banks").createFolder("ecu");
+        var language = program.getLanguage();
+        var child = new ProgramDB("nested", language, language.getDefaultCompilerSpec(), consumer);
+        ghidrassistmcp.HeadlessProjectBackend backend = null;
+        try {
+            nested.createFile("nested", child, TaskMonitor.DUMMY);
+            backend = new ghidrassistmcp.HeadlessProjectBackend(project.getProject());
+            for (String folder : java.util.List.of("/banks/ecu", "banks/ecu/", "banks\\ecu")) {
+                var result = new OpenProgramTool().execute(Map.of("action", "list", "folder", folder), null, backend);
+                assertFalse(Boolean.TRUE.equals(result.isError()), result.content().toString());
+                assertTrue(((McpSchema.TextContent)result.content().getFirst()).text().contains("/banks/ecu/nested"));
+            }
+            assertTrue(new OpenProgramTool().execute(Map.of("action", "list", "folder", "/banks/missing"), null, backend).isError());
+            assertTrue(new OpenProgramTool().execute(Map.of("action", "list", "folder", "/banks/../ecu"), null, backend).isError());
+        } finally {
+            if (backend != null) backend.shutdownHeadlessPrograms();
+            child.release(consumer);
+        }
+    }
+
+    @Test
     void savePersistsAcrossClosingAndReopeningProject() throws Exception {
         int transaction = program.startTransaction("Test change");
         program.setExecutablePath("mcp-persistence-proof");

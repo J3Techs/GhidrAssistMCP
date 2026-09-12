@@ -29,6 +29,22 @@ public final class FunctionLookup {
     private FunctionLookup() {
     }
 
+    /** Shared address (including containing function), qualified-name and thunk resolution. */
+    public static Function resolve(Program program, String identifier) {
+        if (program == null || identifier == null || identifier.isBlank()) return null;
+        String value = identifier.trim();
+        Address address = null;
+        try { address = program.getAddressFactory().getAddress(value); }
+        catch (IllegalArgumentException ignored) { /* A name need not parse as an address. */ }
+        if (address != null) {
+            Function function = program.getFunctionManager().getFunctionAt(address);
+            if (function != null) return function;
+            function = program.getFunctionManager().getFunctionContaining(address);
+            if (function != null) return function;
+        }
+        return findByQualifiedName(program, value);
+    }
+
     /**
      * Find a non-external function whose plain name equals {@code name}. This
      * includes default-source thunk functions, which Ghidra intentionally omits

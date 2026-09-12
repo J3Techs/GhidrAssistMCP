@@ -85,23 +85,6 @@ public class GetFunctionSignatureTool implements McpTool {
     }
 
     private Function findFunction(Program program, String identifier) {
-        try {
-            Address addr = program.getAddressFactory().getAddress(identifier);
-            if (addr != null) {
-                Function func = program.getFunctionManager().getFunctionAt(addr);
-                if (func != null) {
-                    return func;
-                }
-
-                func = program.getFunctionManager().getFunctionContaining(addr);
-                if (func != null) {
-                    return func;
-                }
-            }
-        } catch (Exception e) {
-            // Not an address, continue to name lookup.
-        }
-
-        return FunctionLookup.findByQualifiedName(program, identifier);
+        return FunctionLookup.resolve(program, identifier);
     }
 }

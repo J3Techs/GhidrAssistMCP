@@ -74,7 +74,7 @@ public class BulkTransferLabelsTool implements McpTool {
                         "required", List.of("target_addr", "name")
                     )
                 ),
-                "target_program", Map.of("type", "string", "description", "Name of the target program to apply labels to"),
+                "target_program", Map.of("type", "string", "description", "Exact target program name, project path, URL or program_id; ambiguous names fail"),
                 "dry_run", Map.of("type", "boolean", "description", "If true, validate without applying changes (default false)", "default", false),
                 "conflict_policy", Map.of("type", "string", "enum", List.of("preserve", "replace", "error"), "default", "preserve", "description", "Policy for opt-in annotation conflicts"),
                 "preview_annotations", Map.of("type", "boolean", "description", "Preview opt-in annotations without applying (default true when annotations are present)", "default", true)
@@ -93,12 +93,6 @@ public class BulkTransferLabelsTool implements McpTool {
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram, GhidrAssistMCPBackend backend) {
         String requestedTarget = arguments.get("target_program") instanceof String ? (String)arguments.get("target_program") : null;
-        if (backend == null && (currentProgram == null || requestedTarget == null || !requestedTarget.equals(currentProgram.getName()))) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Backend context not available")
-                .build();
-        }
-
         String targetProgramName = requestedTarget;
         boolean dryRun = false;
         if (arguments.get("dry_run") instanceof Boolean)
@@ -107,7 +101,8 @@ public class BulkTransferLabelsTool implements McpTool {
         try { AnnotationTransferSupport.parsePolicy(conflictPolicy); }
         catch (IllegalArgumentException e) { return McpSchema.CallToolResult.builder().isError(true).addTextContent(e.getMessage()).build(); }
 
-        Program targetProgram = backend == null ? currentProgram : findProgram(backend, targetProgramName);
+        try (var targetLease = ProgramSelection.lease(backend, targetProgramName, currentProgram)) {
+        Program targetProgram = targetLease.program();
         if (targetProgram == null) {
             return McpSchema.CallToolResult.builder()
                 .addTextContent("Target program not found: " + targetProgramName)
@@ -276,14 +271,10 @@ public class BulkTransferLabelsTool implements McpTool {
                 "items", itemResults))
             .addTextContent(result.toString())
             .build();
+        } catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
     }
 
-    private Program findProgram(GhidrAssistMCPBackend backend, String name) {
-        for (Program p : backend.getAllOpenPrograms()) {
-            if (p.getName().equals(name)) return p;
-        }
-        return null;
-    }
+
 
     @SuppressWarnings("unchecked")
     private AnnotationResult validateOrApplyAnnotations(Program p, Function f, Map<String,Object> e,

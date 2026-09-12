@@ -26,7 +26,7 @@ public class ScanFunctionCandidatesTool implements McpTool {
     private static final int DEFAULT_LIMIT = 1000, MAX_LIMIT = 100000;
     @Override public String getName() { return "scan_function_candidates"; }
     @Override public String getDescription() {
-        return "Find bounded executable instruction or call/jump targets without functions; preview by default and optionally create them.";
+        return "Find bounded executable instruction or call/jump targets without functions; preview by default. Apply is atomic: any failure or cancellation rolls back the entire call.";
     }
     @Override public boolean isReadOnly() { return false; }
     @Override public boolean isLongRunning() { return true; }
@@ -74,14 +74,18 @@ public class ScanFunctionCandidatesTool implements McpTool {
                 if (candidates.size() >= limit) break;
             }
             List<Map<String, Object>> rows = new ArrayList<>(candidates.values()); rows.sort(Comparator.comparing(x -> (String)x.get("address")));
-            int created = 0, skipped = 0, failed = 0;
+            int created = 0, skipped = 0, failed = 0, rolledBack = 0;
             ghidra.util.task.TaskMonitor monitor = task != null
                 ? new McpTaskMonitor(task, 0, 100, "Function candidates") : new ConsoleTaskMonitor();
             int tx = -1;
-            if (mode.equals("apply")) tx = program.startTransaction("Scan Function Candidates");
+            if (mode.equals("apply")) {
+                if (program.getCurrentTransactionInfo() != null) return ProjectToolSupport.error("Program has an active transaction");
+                tx = program.startTransaction("Scan Function Candidates");
+            }
             try {
                 for (Map<String, Object> row : rows) {
                     if (cancelled(task)) break;
+                    try {
                     Address address = program.getAddressFactory().getAddress((String) row.get("address"));
                     var block = program.getMemory().getBlock(address);
                     if (block == null || !block.isExecute()) { row.put("status", "rejected_non_executable"); failed++; continue; }
@@ -93,24 +97,32 @@ public class ScanFunctionCandidatesTool implements McpTool {
                     boolean dis = new DisassembleCommand(address, set, true).applyTo(program, monitor);
                     boolean ok = new CreateFunctionCmd(address).applyTo(program, monitor);
                     if (ok) { row.put("status", "created"); created++; } else { row.put("status", "failed"); row.put("disassembled", dis); failed++; }
+                    } catch (Exception e) {
+                        row.put("status", "failed"); row.put("error", e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()); failed++;
+                    }
                 }
                 if (tx >= 0) {
-                    if (cancelled(task)) {
+                    if (cancelled(task) || failed > 0) {
                         program.endTransaction(tx, false);
+                        rolledBack = created;
                         created = 0;
                         for (Map<String, Object> row : rows) {
-                            if ("created".equals(row.get("status"))) row.put("status", "rolled_back_cancelled");
+                            if ("created".equals(row.get("status"))) row.put("status", cancelled(task) ? "rolled_back_cancelled" : "rolled_back_failure");
+                            if (Boolean.TRUE.equals(row.get("disassembled"))) row.put("disassembly_rolled_back", true);
                         }
                     } else {
                         program.endTransaction(tx, true);
                     }
+                    tx = -1;
                 }
             } catch (Exception e) { if (tx >= 0) program.endTransaction(tx, false); throw e; }
             Map<String, Object> result = new LinkedHashMap<>(); result.put("mode", mode); result.put("ranges", rangesText);
             result.put("inspected_instructions", inspected); result.put("candidates", rows); result.put("created", created);
+            result.put("rolled_back", rolledBack);
+            result.put("committed", mode.equals("apply") && !cancelled(task) && failed == 0);
             result.put("skipped", skipped); result.put("failed", failed); result.put("cancelled", cancelled(task));
             result.put("truncated", candidates.size() >= limit || inspected >= limit * 4);
-            return ProjectToolSupport.result(result);
+            return ProjectToolSupport.result(result, mode.equals("apply") && (failed > 0 || cancelled(task)));
         } catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
         catch (Exception e) { return ProjectToolSupport.error("Candidate scan failed: " + e.getMessage()); }
     }

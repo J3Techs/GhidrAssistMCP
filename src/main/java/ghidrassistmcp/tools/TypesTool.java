@@ -52,6 +52,7 @@ public class TypesTool implements McpTool {
                     "description", "Operation to perform",
                     "enum", List.of("list", "get", "set", "create_struct", "create_enum", "create_typedef", "delete")
                 )),
+                Map.entry("conflict_policy", TypeCreationSupport.schema()),
                 Map.entry("name", Map.of("type", "string", "description", "Type name (for get/create/delete)")),
                 Map.entry("category", Map.of("type", "string", "description", "Category path (optional)")),
                 Map.entry("filter", Map.of("type", "string", "description", "Name filter (for list)")),
@@ -222,16 +223,20 @@ public class TypesTool implements McpTool {
         String category = (String) arguments.get("category");
         CategoryPath catPath = category != null ? new CategoryPath(category) : CategoryPath.ROOT;
 
+        String policy;
+        try { policy = TypeCreationSupport.policy(arguments); }
+        catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
+        if (program.getCurrentTransactionInfo() != null) return ProjectToolSupport.error("Program has an active transaction");
         int txId = program.startTransaction("Create Structure");
         try {
             StructureDataType struct = new StructureDataType(catPath, name, size);
             if (packed) struct.setPackingEnabled(true);
-            DataType resolved = program.getDataTypeManager().addDataType(struct, DataTypeConflictHandler.REPLACE_HANDLER);
+            DataType resolved = TypeCreationSupport.add(program.getDataTypeManager(), struct, policy);
             program.endTransaction(txId, true);
             return result("Created structure '" + resolved.getName() + "' (" + resolved.getLength() + " bytes)");
         } catch (Exception e) {
             program.endTransaction(txId, false);
-            return result("Error: " + e.getMessage());
+            return ProjectToolSupport.error("Error: " + e.getMessage());
         }
     }
 
@@ -246,6 +251,10 @@ public class TypesTool implements McpTool {
         String category = (String) arguments.get("category");
         CategoryPath catPath = category != null ? new CategoryPath(category) : CategoryPath.ROOT;
 
+        String policy;
+        try { policy = TypeCreationSupport.policy(arguments); }
+        catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
+        if (program.getCurrentTransactionInfo() != null) return ProjectToolSupport.error("Program has an active transaction");
         int txId = program.startTransaction("Create Enum");
         try {
             EnumDataType enumDt = new EnumDataType(catPath, name, size);
@@ -253,12 +262,12 @@ public class TypesTool implements McpTool {
                 long val = entry.getValue() instanceof Number ? ((Number) entry.getValue()).longValue() : 0;
                 enumDt.add(entry.getKey(), val);
             }
-            DataType resolved = program.getDataTypeManager().addDataType(enumDt, DataTypeConflictHandler.REPLACE_HANDLER);
+            DataType resolved = TypeCreationSupport.add(program.getDataTypeManager(), enumDt, policy);
             program.endTransaction(txId, true);
             return result("Created enum '" + resolved.getName() + "' with " + values.size() + " values");
         } catch (Exception e) {
             program.endTransaction(txId, false);
-            return result("Error: " + e.getMessage());
+            return ProjectToolSupport.error("Error: " + e.getMessage());
         }
     }
 
@@ -272,15 +281,20 @@ public class TypesTool implements McpTool {
         if (baseType == null) baseType = dtm.getDataType(baseTypeName);
         if (baseType == null) return result("Base type not found: " + baseTypeName);
 
+        String policy;
+        try { policy = TypeCreationSupport.policy(arguments); }
+        catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
+        if (program.getCurrentTransactionInfo() != null) return ProjectToolSupport.error("Program has an active transaction");
         int txId = program.startTransaction("Create Typedef");
         try {
-            TypedefDataType td = new TypedefDataType(name, baseType);
-            DataType resolved = dtm.addDataType(td, DataTypeConflictHandler.REPLACE_HANDLER);
+            CategoryPath category = arguments.get("category") instanceof String c ? new CategoryPath(c) : CategoryPath.ROOT;
+            TypedefDataType td = new TypedefDataType(category, name, baseType);
+            DataType resolved = TypeCreationSupport.add(dtm, td, policy);
             program.endTransaction(txId, true);
             return result("Created typedef '" + resolved.getName() + "' -> " + baseType.getName());
         } catch (Exception e) {
             program.endTransaction(txId, false);
-            return result("Error: " + e.getMessage());
+            return ProjectToolSupport.error("Error: " + e.getMessage());
         }
     }
 

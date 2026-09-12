@@ -7,6 +7,11 @@ import ghidra.program.model.listing.Program;
 public final class ProgramIdentity {
     private ProgramIdentity() {}
 
+    /** Allows resource handlers to distinguish an absent target from an invalid selector. */
+    public static final class NotOpenException extends IllegalArgumentException {
+        public NotOpenException(String selector) { super("Program not open: " + selector); }
+    }
+
     public static String id(Program program) {
         var file = program.getDomainFile();
         if (file == null) return "unsaved:" + program.getName() + ":" + Integer.toUnsignedString(System.identityHashCode(program));
@@ -39,7 +44,7 @@ public final class ProgramIdentity {
         if (selector == null || selector.isBlank()) throw new IllegalArgumentException("Program selector must be nonblank");
         List<Program> matches = programs.stream().filter(Objects::nonNull).filter(p -> !p.isClosed())
             .distinct().filter(p -> matches(selector, p)).toList();
-        if (matches.isEmpty()) throw new IllegalArgumentException("Program not open: " + selector);
+        if (matches.isEmpty()) throw new NotOpenException(selector);
         if (matches.size() > 1) throw new IllegalArgumentException("Ambiguous program selector; use program_id: " + selector);
         return matches.get(0);
     }

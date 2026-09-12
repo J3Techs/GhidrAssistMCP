@@ -27,6 +27,8 @@ import io.modelcontextprotocol.spec.McpSchema;
 
 /** Emits stable structured records without requiring callers to parse prose. */
 public class FunctionInventoryTool implements McpTool {
+  @Override public Map<String, Object> getOutputSchema() { return BatchResultSchemas.inventory(); }
+
     private static final int MAX_LIMIT = 1000;
     private static final int MAX_BYTES = 4096;
 
@@ -39,10 +41,10 @@ public class FunctionInventoryTool implements McpTool {
 
     @Override public McpSchema.JsonSchema getInputSchema() {
         return new McpSchema.JsonSchema("object", Map.ofEntries(
-            Map.entry("offset", Map.of("type", "integer", "default", 0)),
-            Map.entry("limit", Map.of("type", "integer", "default", 100)),
-            Map.entry("scan_limit", Map.of("type", "integer", "default", 10000)),
-            Map.entry("max_bytes", Map.of("type", "integer", "default", 32)),
+            Map.entry("offset", Map.of("type", "integer", "minimum", 0, "maximum", 2147483647, "default", 0)),
+            Map.entry("limit", Map.of("type", "integer", "minimum", 0, "maximum", 1000, "default", 100)),
+            Map.entry("scan_limit", Map.of("type", "integer", "minimum", 1, "maximum", 1000000, "default", 10000)),
+            Map.entry("max_bytes", Map.of("type", "integer", "minimum", 0, "maximum", 4096, "default", 32)),
             Map.entry("pattern", Map.of("type", "string")),
             Map.entry("match_mode", Map.of("type", "string", "enum",
                 List.of("contains", "wildcard", "regex", "starts_with", "ends_with"), "default", "contains")),
@@ -50,7 +52,7 @@ public class FunctionInventoryTool implements McpTool {
             Map.entry("range_start", Map.of("type", "string")),
             Map.entry("range_end", Map.of("type", "string")),
             Map.entry("include_edges", Map.of("type", "boolean", "default", false)),
-            Map.entry("edge_limit", Map.of("type", "integer", "default", 100))
+            Map.entry("edge_limit", Map.of("type", "integer", "minimum", 0, "maximum", 1000, "default", 100))
         ), List.of(), null, null, null);
     }
 
@@ -105,6 +107,10 @@ public class FunctionInventoryTool implements McpTool {
             result.put("total_matched", matched);
             result.put("truncated", scanTruncated || matched > (long) offset + records.size());
             result.put("scan_truncated", scanTruncated);
+            result.put("total_matched_is_exact", !scanTruncated);
+            // A zero-sized page cannot advance. A scan ceiling is not a resumable match offset.
+            result.put("next_offset", !records.isEmpty() && matched > (long) offset + records.size()
+                ? (long) offset + records.size() : null);
             result.put("functions", records);
             return ProjectToolSupport.result(result);
         } catch (Exception e) {

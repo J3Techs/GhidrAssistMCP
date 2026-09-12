@@ -34,9 +34,9 @@ class CustomCompatibilityTest {
             assertTrue(tools.containsKey(name), name);
         }
         assertEquals(tools.get("get_functions").inputSchema(), tools.get("list_functions").inputSchema());
-        assertTrue(tools.get("list_functions").inputSchema().properties().containsKey("match_mode"));
-        assertTrue(tools.get("set_local_variable_type").inputSchema().required().contains("variable_name"));
-        assertTrue(tools.get("run_script").inputSchema().properties().containsKey("max_output_chars"));
+        assertTrue(((Map<?, ?>) tools.get("list_functions").inputSchema().get("properties")).containsKey("match_mode"));
+        assertTrue(((java.util.List<?>) tools.get("set_local_variable_type").inputSchema().get("required")).contains("variable_name"));
+        assertTrue(((Map<?, ?>) tools.get("run_script").inputSchema().get("properties")).containsKey("max_output_chars"));
         assertFalse(tools.containsKey("scripts"));
         assertFalse(tools.containsKey("import_file"));
         assertFalse(tools.containsKey("export_program"));
@@ -61,7 +61,8 @@ class CustomCompatibilityTest {
             "vt_matches", "vt_review_matches", "vt_add_matches", "vt_markup", "vt_apply_markup", "vt_unapply_markup",
             "datatype_archive_catalog", "parse_c_declarations", "datatype_import_selected", "program_diff",
             "fid_list_databases", "fid_identify_functions", "save_project_session")));
-        assertEquals(94 + bsimNames.size() + 17, names.size());
+        assertTrue(names.containsAll(Set.of("wait_task", "runtime_capabilities")));
+        assertEquals(94 + bsimNames.size() + 19, names.size());
     }
 
     @Test

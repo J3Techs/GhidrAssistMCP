@@ -29,6 +29,29 @@ import ghidra.util.task.TaskMonitor;
 class BsimContextTest {
     private static final Object CONSUMER = new Object();
 
+    @Test void boundProjectWinsOverDifferentGlobalProject(@TempDir Path temporary) throws Exception {
+        var original = ghidra.framework.main.AppInfo.getActiveProject();
+        var bound = GhidraProject.createProject(temporary.toString(), "BoundProject", false);
+        var global = GhidraProject.createProject(temporary.toString(), "GlobalProject", false);
+        try {
+            var language = DefaultLanguageService.getLanguageService().getLanguage(new LanguageID("x86:LE:32:default"));
+            var program = new ProgramDB("bound_program", language, language.getDefaultCompilerSpec(), CONSUMER);
+            try { bound.getProjectData().getRootFolder().createFile("bound_program", program, TaskMonitor.DUMMY); }
+            finally { program.release(CONSUMER); }
+            ghidra.framework.main.AppInfo.setActiveProject(global.getProject());
+            var backend = new ghidrassistmcp.GhidrAssistMCPBackend() {
+                @Override public ghidra.framework.model.Project getProject() { return bound.getProject(); }
+                @Override public boolean isHeadlessSession() { return true; }
+            };
+            try (var context = new BsimContext(null, backend, new BsimConnections(temporary.resolve("settings")), temporary, null)) {
+                var handles = context.resolvePrograms(Map.of("project_folder", "/"), TaskMonitor.DUMMY);
+                assertEquals(1, handles.size());
+                assertEquals("bound_program", handles.get(0).program().getName());
+                assertEquals(bound.getProject().getProjectLocator(), handles.get(0).program().getDomainFile().getProjectLocator());
+            } finally { backend.getTaskManager().shutdown(); }
+        } finally { ghidra.framework.main.AppInfo.setActiveProject(original); global.close(); bound.close(); }
+    }
+
     @BeforeAll
     static void initializeGhidra() throws Exception {
         if (!Application.isInitialized()) {

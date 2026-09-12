@@ -66,7 +66,7 @@ public class GetCodeTool implements McpTool {
 
     @Override
     public String getDescription() {
-        return "Get code representation of a function (decompiler, disassembly, or pcode). structured=true returns bounded native variables, p-code, optional tokens or instruction records.";
+        return "Get bounded code text (decompiler, disassembly, or pcode); max_chars limits text and max_items limits instructions or p-code operations. structured=true returns bounded native variables, p-code, optional tokens or instruction records.";
     }
 
     @Override
@@ -88,6 +88,7 @@ public class GetCodeTool implements McpTool {
                     "default", false
                 ),
                 "structured", Map.of("type", "boolean", "default", false),
+                "max_chars", Map.of("type", "integer", "minimum", 1024, "maximum", 200000, "default", 200000),
                 "max_items", Map.of("type", "integer", "minimum", 1, "maximum", 10000, "default", 1000),
                 "timeout_seconds", Map.of("type", "integer", "minimum", 1, "maximum", 300, "default", 30),
                 "include_tokens", Map.of("type", "boolean", "default", false)
@@ -108,7 +109,9 @@ public class GetCodeTool implements McpTool {
     private McpSchema.CallToolResult executeWithMonitor(Map<String, Object> arguments, Program currentProgram, TaskMonitor monitor) {
         try {
             monitor.checkCancelled();
-            int timeout = StructuredCode.positive(arguments, "timeout_seconds", 30, 300);
+            int timeout = QueryPageBounds.integer(arguments, "timeout_seconds", 30, 1, 300);
+            int maxItems = QueryPageBounds.integer(arguments, "max_items", 1000, 1, 10000);
+            int maxChars = QueryPageBounds.integer(arguments, "max_chars", 200000, 1024, 200000);
             if (currentProgram == null) {
                 return McpSchema.CallToolResult.builder()
                     .isError(true)
@@ -156,11 +159,11 @@ public class GetCodeTool implements McpTool {
                 return StructuredCode.read(decompilerService, arguments, currentProgram, function, format, monitor);
             switch (format) {
                 case "decompiler":
-                    return getDecompiledCode(currentProgram, function, timeout, monitor);
+                    return getDecompiledCode(currentProgram, function, timeout, monitor, maxChars);
                 case "disassembly":
-                    return getDisassemblyCode(currentProgram, function, monitor);
+                    return getDisassemblyCode(currentProgram, function, monitor, maxItems, maxChars);
                 case "pcode":
-                    return getPcodeRepresentation(currentProgram, function, raw, timeout, monitor);
+                    return getPcodeRepresentation(currentProgram, function, raw, timeout, monitor, maxItems, maxChars);
                 default:
                     return McpSchema.CallToolResult.builder()
                         .isError(true)
@@ -179,7 +182,7 @@ public class GetCodeTool implements McpTool {
     /**
      * Get decompiled C-like code for a function.
      */
-    private McpSchema.CallToolResult getDecompiledCode(Program program, Function function, int timeout, TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
+    private McpSchema.CallToolResult getDecompiledCode(Program program, Function function, int timeout, TaskMonitor monitor, int maxChars) throws ghidra.util.exception.CancelledException {
         try (DecompilerSession session = decompilerService.open(function.getProgram())) {
             monitor.checkCancelled();
             DecompileResults results = session.decompiler().decompileFunction(function,
@@ -210,7 +213,7 @@ public class GetCodeTool implements McpTool {
             }
 
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Decompiled function " + function.getName(true) + ":\n\n" + decompiledCode)
+                .addTextContent(new BoundedQueryText(maxChars).append("Decompiled function ").append(function.getName(true)).append(":\n\n").append(decompiledCode).toString())
                 .build();
 
         } catch (ghidra.util.exception.CancelledException e) {
@@ -226,8 +229,8 @@ public class GetCodeTool implements McpTool {
     /**
      * Get disassembly for a function.
      */
-    private McpSchema.CallToolResult getDisassemblyCode(Program program, Function function, TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
-        StringBuilder result = new StringBuilder();
+    private McpSchema.CallToolResult getDisassemblyCode(Program program, Function function, TaskMonitor monitor, int maxItems, int maxChars) throws ghidra.util.exception.CancelledException {
+        BoundedQueryText result = new BoundedQueryText(maxChars);
         result.append("Disassembly of function: ").append(function.getName(true)).append("\n");
         result.append("Entry Point: ").append(function.getEntryPoint()).append("\n\n");
 
@@ -236,6 +239,7 @@ public class GetCodeTool implements McpTool {
 
         int instructionCount = 0;
         while (instrIter.hasNext()) {
+            if (instructionCount >= maxItems || result.full()) { result.truncate(); break; }
             monitor.checkCancelled();
             Instruction instruction = instrIter.next();
 
@@ -272,8 +276,8 @@ public class GetCodeTool implements McpTool {
     /**
      * Get P-Code representation for a function.
      */
-    private McpSchema.CallToolResult getPcodeRepresentation(Program program, Function function, boolean raw, int timeout, TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
-        StringBuilder result = new StringBuilder();
+    private McpSchema.CallToolResult getPcodeRepresentation(Program program, Function function, boolean raw, int timeout, TaskMonitor monitor, int maxItems, int maxChars) throws ghidra.util.exception.CancelledException {
+        BoundedQueryText result = new BoundedQueryText(maxChars);
         result.append("P-Code for: ").append(function.getName(true))
               .append(" @ ").append(function.getEntryPoint()).append("\n\n");
 
@@ -298,12 +302,15 @@ public class GetCodeTool implements McpTool {
                     .build();
             }
 
+            int operationCount = 0;
             // Get P-Code operations
             if (raw) {
                 // Raw P-Code from high function
                 result.append("## Raw P-Code Operations:\n```\n");
                 Iterator<PcodeOpAST> ops = highFunction.getPcodeOps();
                 while (ops.hasNext()) {
+                    if (operationCount >= maxItems || result.full()) { result.truncate(); break; }
+                    operationCount++;
                     monitor.checkCancelled();
                     PcodeOpAST op = ops.next();
                     result.append(op.getSeqnum().getTarget()).append(": ")
@@ -315,7 +322,8 @@ public class GetCodeTool implements McpTool {
                 result.append("## P-Code by Basic Blocks:\n\n");
                 var blocks = highFunction.getBasicBlocks();
 
-                for (var block : blocks) {
+                blockLoop: for (var block : blocks) {
+                    if (operationCount >= maxItems || result.full()) { result.truncate(); break; }
                     monitor.checkCancelled();
                     if (block instanceof PcodeBlockBasic basicBlock) {
                         result.append("### Block ").append(basicBlock.getIndex())
@@ -324,6 +332,8 @@ public class GetCodeTool implements McpTool {
 
                         Iterator<PcodeOp> blockOps = basicBlock.getIterator();
                         while (blockOps.hasNext()) {
+                            if (operationCount >= maxItems || result.full()) { result.truncate(); break blockLoop; }
+                            operationCount++;
                             monitor.checkCancelled();
                             PcodeOp op = blockOps.next();
                             result.append("  ").append(op.toString()).append("\n");
@@ -353,23 +363,6 @@ public class GetCodeTool implements McpTool {
      * Supports C++ qualified names (e.g., "Class::method" or "Outer::Inner::method").
      */
     private Function findFunction(Program program, String identifier) {
-        // Try to parse as address first
-        try {
-            Address addr = program.getAddressFactory().getAddress(identifier);
-            if (addr != null) {
-                // Try to get function at the address
-                Function func = program.getFunctionManager().getFunctionAt(addr);
-                if (func != null) return func;
-
-                // If not found at address, try containing function
-                func = program.getFunctionManager().getFunctionContaining(addr);
-                if (func != null) return func;
-            }
-        } catch (Exception e) {
-            // Not an address, try as function name
-        }
-
-        // Handles C++ qualified names (Class::method) and plain names
-        return FunctionLookup.findByQualifiedName(program, identifier);
+        return FunctionLookup.resolve(program, identifier);
     }
 }

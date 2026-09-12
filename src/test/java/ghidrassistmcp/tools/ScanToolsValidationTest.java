@@ -19,6 +19,11 @@ import ghidra.program.model.listing.ProgramContext;
 class ScanToolsValidationTest {
     @Test
     void instructionLimitsAreExplicitAndBounded() {
+        Map<?, ?> limitSchema = (Map<?, ?>) new ScanInstructionsTool().getInputSchema().properties().get("max_instructions");
+        assertEquals(1, limitSchema.get("minimum"));
+        assertEquals(100000, limitSchema.get("maximum"));
+        Map<?, ?> mnemonics = (Map<?, ?>) new ScanInstructionsTool().getInputSchema().properties().get("mnemonics");
+        assertEquals(256, mnemonics.get("maxItems"));
         assertEquals(1000, ScanInstructionsTool.limit(null));
         assertEquals(12, ScanInstructionsTool.limit(12));
         assertThrows(IllegalArgumentException.class, () -> ScanInstructionsTool.limit(0));
@@ -36,6 +41,7 @@ class ScanToolsValidationTest {
 
     @Test
     void mutatingCandidateToolDefaultsToPreviewAndSetterIsMarkedMutable() {
+        assertTrue(new RunScriptTool().isOpenWorld());
         assertTrue(new ScanFunctionCandidatesTool().getDescription().contains("preview"));
         assertFalse(new ScanFunctionCandidatesTool().isReadOnly());
         assertFalse(new SetRegisterContextTool().isReadOnly());

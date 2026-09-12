@@ -37,7 +37,7 @@ public class ClearCodeRangesTool implements McpTool {
     public String getDescription() {
         return "Clear functions, instructions, and/or data in specified address ranges. " +
                "Format ranges as 'start-end' pairs separated by commas (e.g., '0x1000-0x2000,0x3000-0x4000'). " +
-               "Use dry_run=true to see what would be cleared without making changes.";
+               "Ranges are half-open; selected code units must fit completely within a range. Overlaps are counted once. Use dry_run=true to preview.";
     }
 
     @Override
@@ -101,7 +101,9 @@ public class ClearCodeRangesTool implements McpTool {
         FunctionManager funcManager = currentProgram.getFunctionManager();
         Listing listing = currentProgram.getListing();
 
-        // Count what would be cleared (always do this for reporting)
+        java.util.Set<Address> selectedUnits = new java.util.HashSet<>();
+        java.util.Set<Address> selectedFunctions = new java.util.HashSet<>();
+        // Freeze exactly the units used by both preview and apply.
         for (AddressRange range : ranges) {
             ClearResult result = new ClearResult();
             result.start = range.start;
@@ -113,23 +115,29 @@ public class ClearCodeRangesTool implements McpTool {
                 while (funcIter.hasNext()) {
                     Function func = funcIter.next();
                     if (func.getEntryPoint().compareTo(range.end) >= 0) break;
-                    result.functionsCount++;
+                    if (selectedFunctions.add(func.getEntryPoint())) {
+                        result.functions.add(func.getEntryPoint());
+                        result.functionsCount++;
+                    }
                 }
             }
 
             // Count instructions and data in range
+            CodeUnit containing = listing.getCodeUnitContaining(range.start);
+            if (selected(containing, clearInstructions, clearData) && containing.getMinAddress().compareTo(range.start) < 0)
+                return ProjectToolSupport.error("Range start cuts a selected code unit at " + containing.getMinAddress());
             CodeUnitIterator codeUnits = listing.getCodeUnits(range.start, true);
             while (codeUnits.hasNext()) {
                 CodeUnit cu = codeUnits.next();
                 if (cu.getAddress().compareTo(range.end) >= 0) break;
 
-                if (cu instanceof Instruction && clearInstructions) {
-                    result.instructionsCount++;
-                } else if (cu instanceof Data && clearData) {
-                    Data data = (Data) cu;
-                    if (data.isDefined()) {
-                        result.dataCount++;
-                    }
+                if (selected(cu, clearInstructions, clearData)) {
+                    if (cu.getMaxAddress().compareTo(range.end) >= 0)
+                        return ProjectToolSupport.error("Range end cuts a selected code unit at " + cu.getMinAddress());
+                    if (!selectedUnits.add(cu.getMinAddress())) continue;
+                    result.units.add(new AddressRange(cu.getMinAddress(), cu.getMaxAddress().add(1)));
+                    if (cu instanceof Instruction) result.instructionsCount++;
+                    else result.dataCount++;
                 }
             }
 
@@ -142,35 +150,20 @@ public class ClearCodeRangesTool implements McpTool {
         }
 
         // Perform the actual clearing within a transaction
+        if (currentProgram.getCurrentTransactionInfo() != null)
+            return ProjectToolSupport.error("Program has an active transaction; retry after it finishes");
         int transactionID = currentProgram.startTransaction("Clear Code Ranges");
         try {
             for (int i = 0; i < ranges.size(); i++) {
                 AddressRange range = ranges.get(i);
                 ClearResult result = results.get(i);
 
-                // Clear functions first
-                if (clearFunctions) {
-                    List<Address> funcAddresses = new ArrayList<>();
-                    FunctionIterator funcIter = funcManager.getFunctions(range.start, true);
-                    while (funcIter.hasNext()) {
-                        Function func = funcIter.next();
-                        if (func.getEntryPoint().compareTo(range.end) >= 0) break;
-                        funcAddresses.add(func.getEntryPoint());
-                    }
-                    for (Address funcAddr : funcAddresses) {
-                        funcManager.removeFunction(funcAddr);
-                    }
-                    result.functionsCleared = funcAddresses.size();
-                }
-
-                // Clear code units (instructions and/or data)
-                if (clearInstructions || clearData) {
-                    // Use clearCodeUnits which clears both instructions and defined data
-                    // The third parameter (clearContext) is set to false to preserve register context
-                    listing.clearCodeUnits(range.start, range.end.subtract(1), false);
-                    result.instructionsCleared = result.instructionsCount;
-                    result.dataCleared = result.dataCount;
-                }
+                for (Address function : result.functions) funcManager.removeFunction(function);
+                result.functionsCleared = result.functions.size();
+                for (AddressRange unit : result.units)
+                    listing.clearCodeUnits(unit.start, unit.end.subtract(1), false);
+                result.instructionsCleared = result.instructionsCount;
+                result.dataCleared = result.dataCount;
             }
 
             currentProgram.endTransaction(transactionID, true);
@@ -179,7 +172,7 @@ public class ClearCodeRangesTool implements McpTool {
         } catch (Exception e) {
             currentProgram.endTransaction(transactionID, false);
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Error clearing code ranges: " + e.getMessage())
+                .isError(true).addTextContent("Error clearing code ranges: " + e.getMessage())
                 .build();
         }
     }
@@ -249,6 +242,10 @@ public class ClearCodeRangesTool implements McpTool {
     /**
      * Build the result report.
      */
+    private static boolean selected(CodeUnit unit, boolean instructions, boolean data) {
+        return unit instanceof Instruction && instructions || unit instanceof Data d && data && d.isDefined();
+    }
+
     private McpSchema.CallToolResult buildReport(List<ClearResult> results, boolean isDryRun) {
         StringBuilder report = new StringBuilder();
 
@@ -318,6 +315,8 @@ public class ClearCodeRangesTool implements McpTool {
      * Helper class to track clearing results.
      */
     private static class ClearResult {
+        final List<Address> functions = new ArrayList<>();
+        final List<AddressRange> units = new ArrayList<>();
         Address start;
         Address end;
         int functionsCount = 0;

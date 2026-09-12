@@ -9,21 +9,30 @@ import java.net.http.*;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.modelcontextprotocol.json.jackson.JacksonMcpJsonMapper;
+import io.modelcontextprotocol.json.jackson2.JacksonMcpJsonMapper;
 import io.modelcontextprotocol.server.transport.HttpServletStreamableServerTransportProvider;
 import jakarta.servlet.http.HttpServletRequest;
 import io.modelcontextprotocol.server.McpServer;
 import io.modelcontextprotocol.spec.McpSchema;
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.ServerConnector;
-import org.eclipse.jetty.servlet.ServletContextHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
+import org.eclipse.jetty.ee10.servlet.ServletContextHandler;
+import org.eclipse.jetty.ee10.servlet.ServletHolder;
 
 class LenientStreamableTransportServletTest {
-    @Test void realTransportInitializesIndependentClientsAndDoesNotRememberTheirHeaders() throws Exception {
+    @Test void strictDefaultPreservesClientAcceptHeader() {
         var provider = HttpServletStreamableServerTransportProvider.builder()
             .jsonMapper(new JacksonMcpJsonMapper(new ObjectMapper())).mcpEndpoint("/mcp").build();
         var servlet = new LenientStreamableTransportServlet(provider, "/mcp");
+        try {
+            assertEquals("application/json", servlet.wrapRequest(request(null)).getHeader("Accept"));
+        } finally { servlet.destroy(); }
+    }
+
+    @Test void realTransportInitializesIndependentClientsAndDoesNotRememberTheirHeaders() throws Exception {
+        var provider = HttpServletStreamableServerTransportProvider.builder()
+            .jsonMapper(new JacksonMcpJsonMapper(new ObjectMapper())).mcpEndpoint("/mcp").build();
+        var servlet = new LenientStreamableTransportServlet(provider, "/mcp", true);
         var mcp = McpServer.sync(provider).serverInfo("session-regression", "1.0")
             .capabilities(McpSchema.ServerCapabilities.builder().build()).build();
         var server = new Server();
@@ -58,7 +67,7 @@ class LenientStreamableTransportServletTest {
     @Test void concurrentRequestWrappersPreserveOnlyExplicitSessionHeaders() throws Exception {
         var provider = HttpServletStreamableServerTransportProvider.builder()
             .jsonMapper(new JacksonMcpJsonMapper(new ObjectMapper())).mcpEndpoint("/mcp").build();
-        var servlet = new LenientStreamableTransportServlet(provider, "/mcp");
+        var servlet = new LenientStreamableTransportServlet(provider, "/mcp", true);
         try (var executor = Executors.newFixedThreadPool(2)) {
             List<Callable<Void>> checks = new ArrayList<>();
             for (String id : List.of("client-a", "client-b")) checks.add(() -> {

@@ -8,11 +8,7 @@ import java.io.PrintWriter;
 import java.io.Writer;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
-import javax.swing.SwingUtilities;
 
 import generic.jar.ResourceFile;
 import ghidra.app.script.GhidraScript;
@@ -37,6 +33,11 @@ import io.modelcontextprotocol.spec.McpSchema;
  */
 public class RunScriptTool implements McpTool {
 
+    @Override
+    public boolean isOpenWorld() {
+        return true; // User scripts may access filesystem, processes, and network services.
+    }
+
     private static final int DEFAULT_TIMEOUT_MINUTES = 10;
     private static final int DEFAULT_MAX_OUTPUT_CHARS = 200_000;
     private static final ReentrantLock SCRIPT_LOCK = new ReentrantLock();
@@ -52,7 +53,8 @@ public class RunScriptTool implements McpTool {
         return "Execute a GhidraScript by name or path. " +
                "Searches Ghidra script directories if only name is provided. " +
                "Supports Java (.java) and Python (.py) scripts. " +
-               "Returns captured stdout and stderr output.";
+               "Returns captured stdout and stderr output. Runs off the EDT by default; run_on_edt=true is available for UI scripts. " +
+               "timeout_minutes (default 10, 0 disables) requests cooperative cancellation; ownership is retained until the script stops.";
     }
 
     @Override
@@ -73,7 +75,7 @@ public class RunScriptTool implements McpTool {
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
         // This tool needs the backend to access plugin/tool context
         return McpSchema.CallToolResult.builder()
-            .addTextContent("This tool requires backend context for script execution. " +
+            .isError(true).addTextContent("This tool requires backend context for script execution. " +
                           "Please ensure the MCP server is properly connected.")
             .build();
     }
@@ -100,15 +102,21 @@ public class RunScriptTool implements McpTool {
 
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram, GhidrAssistMCPBackend backend) {
+        return execute(arguments, currentProgram, backend, null);
+    }
+
+    @Override
+    public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram,
+            GhidrAssistMCPBackend backend, ghidrassistmcp.tasks.McpTask task) {
         if (currentProgram == null) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("No program currently loaded")
+                .isError(true).addTextContent("No program currently loaded")
                 .build();
         }
 
         if (backend == null) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Backend context not available")
+                .isError(true).addTextContent("Backend context not available")
                 .build();
         }
 
@@ -117,14 +125,18 @@ public class RunScriptTool implements McpTool {
         String scriptPath = (String) arguments.get("script_path");
         Object scriptArgsObj = arguments.get("script_args");
         int timeoutMinutes = getIntArg(arguments, "timeout_minutes", DEFAULT_TIMEOUT_MINUTES);
-        boolean runOnEdt = getBooleanArg(arguments, "run_on_edt", true);
+        boolean runOnEdt = getBooleanArg(arguments, "run_on_edt", false);
         int maxOutputChars = getIntArg(arguments, "max_output_chars", DEFAULT_MAX_OUTPUT_CHARS);
+        if (timeoutMinutes < 0 || timeoutMinutes > 1440)
+            return McpSchema.CallToolResult.builder().isError(true).addTextContent("timeout_minutes must be between 0 and 1440").build();
+        TaskMonitor monitor = task == null ? new ghidra.util.task.TaskMonitorAdapter(true)
+            : new ghidrassistmcp.tasks.McpTaskMonitor(task, 0, 100, "Running script");
 
         // Require at least one of script_name or script_path
         if ((scriptName == null || scriptName.trim().isEmpty()) &&
             (scriptPath == null || scriptPath.trim().isEmpty())) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Either script_name or script_path is required")
+                .isError(true).addTextContent("Either script_name or script_path is required")
                 .build();
         }
 
@@ -137,7 +149,7 @@ public class RunScriptTool implements McpTool {
             scriptFile = resolveScript(scriptName, scriptPath);
         } catch (Exception e) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Error resolving script: " + e.getMessage())
+                .isError(true).addTextContent("Error resolving script: " + e.getMessage())
                 .build();
         }
 
@@ -145,14 +157,14 @@ public class RunScriptTool implements McpTool {
         GhidrAssistMCPPlugin plugin = backend.getActivePlugin();
         if (plugin == null) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("No active plugin available. Make sure Ghidra has focus.")
+                .isError(true).addTextContent("No active plugin available. Make sure Ghidra has focus.")
                 .build();
         }
 
         PluginTool tool = plugin.getTool();
         if (tool == null) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("No tool available from plugin")
+                .isError(true).addTextContent("No tool available from plugin")
                 .build();
         }
 
@@ -160,7 +172,7 @@ public class RunScriptTool implements McpTool {
         if (!SCRIPT_LOCK.tryLock()) {
             String running = activeScriptName != null ? activeScriptName : "unknown";
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Another script is already running: " + running +
+                .isError(true).addTextContent("Another script is already running: " + running +
                     "\nCancel the running task or wait for completion before starting a new script.")
                 .build();
         }
@@ -185,7 +197,7 @@ public class RunScriptTool implements McpTool {
             GhidraScriptProvider provider = GhidraScriptUtil.getProvider(scriptFile);
             if (provider == null) {
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("No script provider found for: " + scriptFilename +
+                    .isError(true).addTextContent("No script provider found for: " + scriptFilename +
                                   ". Supported types: .java, .py")
                     .build();
             }
@@ -194,7 +206,7 @@ public class RunScriptTool implements McpTool {
             GhidraScript script = provider.getScriptInstance(scriptFile, output);
             if (script == null) {
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("Failed to create script instance for: " + scriptFilename)
+                    .isError(true).addTextContent("Failed to create script instance for: " + scriptFilename)
                     .build();
             }
 
@@ -215,7 +227,7 @@ public class RunScriptTool implements McpTool {
             );
 
             // Create ScriptControls with output/error writers and task monitor
-            ScriptControls controls = new ScriptControls(output, error, TaskMonitor.DUMMY);
+            ScriptControls controls = new ScriptControls(output, error, monitor);
 
             // Initialize script with state using new API
             script.set(state, controls);
@@ -225,70 +237,22 @@ public class RunScriptTool implements McpTool {
                 script.setScriptArgs(scriptArgs);
             }
 
-            // Execute script (optionally on EDT). Use a latch to wait for completion.
-            final CountDownLatch completionLatch = new CountDownLatch(1);
-            final AtomicReference<Exception> scriptError = new AtomicReference<>();
-            final AtomicReference<Boolean> scriptSuccess = new AtomicReference<>(false);
-
-            // Capture these for use in the Runnable
-            final GhidraScript finalScript = script;
-            final GhidraState finalState = state;
-            final ScriptControls finalControls = controls;
-            final String finalScriptFilename = scriptFilename;
-            final Program finalProgram = currentProgram;
-
-            Runnable scriptRunner = () -> {
-                int transactionID = finalProgram.startTransaction("Run Script: " + finalScriptFilename);
+            ghidrassistmcp.tasks.OwnedScriptExecution.run(() -> {
+                monitor.checkCancelled();
+                int transactionID = currentProgram.startTransaction("Run Script: " + scriptFilename);
+                boolean commit = false;
                 try {
-                    // Use execute() with ScriptControls (new non-deprecated API)
-                    finalScript.execute(finalState, finalControls);
-                    finalProgram.endTransaction(transactionID, true);
-                    scriptSuccess.set(true);
-                } catch (Exception e) {
-                    finalProgram.endTransaction(transactionID, false);
-                    scriptError.set(e);
-                    Msg.error(this, "Script execution failed: " + e.getMessage(), e);
-                } finally {
-                    completionLatch.countDown();
-                }
-            };
-
-            if (runOnEdt) {
-                if (SwingUtilities.isEventDispatchThread()) {
-                    // Already on EDT, run directly
-                    scriptRunner.run();
-                } else {
-                    // Schedule on EDT and wait
-                    SwingUtilities.invokeLater(scriptRunner);
-                    try {
-                        // Wait up to configured timeout for script completion
-                        if (timeoutMinutes > 0) {
-                            if (!completionLatch.await(timeoutMinutes, TimeUnit.MINUTES)) {
-                                scriptException = new RuntimeException(
-                                    "Script execution timed out after " + timeoutMinutes + " minutes");
-                            }
-                        } else {
-                            completionLatch.await();
-                        }
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        scriptException = e;
-                    }
-                }
-            } else {
-                // Run off the EDT to avoid UI lockups
-                scriptRunner.run();
-            }
-
-            // Get results from atomic references
-            if (scriptError.get() != null) {
-                scriptException = scriptError.get();
-            }
-            success = scriptSuccess.get();
-
+                    script.execute(state, controls);
+                    monitor.checkCancelled();
+                    commit = true;
+                } finally { currentProgram.endTransaction(transactionID, commit); }
+            }, monitor, timeoutMinutes > 0 ? java.time.Duration.ofMinutes(timeoutMinutes) : java.time.Duration.ZERO,
+                task, runOnEdt);
+            success = true;
         } catch (Exception e) {
+            propagateTaskCancellation(task, monitor, e);
             scriptException = e;
-            Msg.error(this, "Script setup failed: " + e.getMessage(), e);
+            Msg.error(this, "Script execution failed: " + e.getMessage(), e);
         }
         finally {
             activeScriptName = null;
@@ -349,8 +313,17 @@ public class RunScriptTool implements McpTool {
         }
 
         return McpSchema.CallToolResult.builder()
-            .addTextContent(result.toString())
+            .isError(!success).addTextContent(result.toString())
             .build();
+    }
+
+    /** Preserve the async manager's cancellation state after the script runner has settled. */
+    static void propagateTaskCancellation(ghidrassistmcp.tasks.McpTask task, TaskMonitor monitor, Exception failure) {
+        if (task != null && monitor.isCancelled()) {
+            var cancelled = new java.util.concurrent.CancellationException("Script cancelled after its runner stopped");
+            cancelled.initCause(failure);
+            throw cancelled;
+        }
     }
 
     /**

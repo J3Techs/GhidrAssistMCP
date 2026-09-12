@@ -66,12 +66,14 @@ public class ListFunctionsTool implements McpTool {
                 )),
                 Map.entry("offset", Map.of(
                     "type", "integer",
+                    "minimum", 0, "maximum", Integer.MAX_VALUE,
                     "description", "Number of matching results to skip (default 0)",
                     "default", 0
                 )),
                 Map.entry("limit", Map.of(
                     "type", "integer",
-                    "description", "Maximum number of results to return (default 100)",
+                    "minimum", 1, "maximum", QueryPageBounds.MAX_LIMIT,
+                    "description", "Maximum number of results to return (default 100, maximum 1000)",
                     "default", 100
                 ))
             ),
@@ -180,7 +182,7 @@ public class ListFunctionsTool implements McpTool {
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
         if (currentProgram == null) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("No program currently loaded")
+                .isError(true).addTextContent("No program currently loaded")
                 .build();
         }
 
@@ -196,17 +198,11 @@ public class ListFunctionsTool implements McpTool {
             matchMode = (String) arguments.get("match_mode");
         }
 
-        int offset = 0;
-        int limit = 100;  // Default limit
-
-        if (arguments.get("offset") instanceof Number) {
-            offset = ((Number) arguments.get("offset")).intValue();
-        }
-        if (arguments.get("limit") instanceof Number) {
-            limit = ((Number) arguments.get("limit")).intValue();
-        }
-
         try {
+            int offset = QueryPageBounds.integer(arguments, "offset", 0, 0, Integer.MAX_VALUE);
+            int limit = QueryPageBounds.integer(arguments, "limit", 100, 1, QueryPageBounds.MAX_LIMIT);
+            if (!List.of("auto", "contains", "wildcard", "regex", "starts_with", "ends_with").contains(matchMode))
+                return ProjectToolSupport.error("Invalid match_mode");
             String result = listFunctions(currentProgram, pattern, matchMode, caseSensitive, offset, limit);
             return McpSchema.CallToolResult.builder()
                 .addTextContent(result)
@@ -217,12 +213,12 @@ public class ListFunctionsTool implements McpTool {
                 .addTextContent("Invalid regex pattern: " + e.getMessage() +
                     "\n\nHint: If you meant to use wildcards like * and ?, try match_mode: \"wildcard\" instead of \"regex\".")
                 .build();
-        }
+        } catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
     }
 
     private String listFunctions(Program program, String pattern, String matchMode,
                                   boolean caseSensitive, int offset, int limit) {
-        StringBuilder result = new StringBuilder();
+        BoundedQueryText result = new BoundedQueryText();
 
         boolean hasPattern = pattern != null && !pattern.trim().isEmpty();
 
@@ -243,30 +239,17 @@ public class ListFunctionsTool implements McpTool {
 
         FunctionIterator functions = program.getFunctionManager().getFunctions(true);
 
-        // Collect matching functions
-        List<Function> matchingFunctions = new ArrayList<>();
-        while (functions.hasNext()) {
-            Function function = functions.next();
-
-            if (hasPattern) {
-                if (matcher.test(function.getName()) || matcher.test(function.getName(true))) {
-                    matchingFunctions.add(function);
-                }
-            } else {
-                matchingFunctions.add(function);
-            }
-        }
-
-        int totalCount = matchingFunctions.size();
+        // Keep only the requested page in memory; count matches without collecting functions.
+        long totalCount = 0;
         int count = 0;
-
-        // Apply offset and limit
-        for (int i = offset; i < matchingFunctions.size() && count < limit; i++) {
-            Function function = matchingFunctions.get(i);
+        while (functions.hasNext()) {
+            if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException("Function listing cancelled");
+            Function function = functions.next();
+            if (hasPattern && !(matcher.test(function.getName()) || matcher.test(function.getName(true)))) continue;
+            if (totalCount++ < offset || count >= limit || result.full()) continue;
             result.append("- ").append(function.getName(true))
                   .append(" @ ").append(function.getEntryPoint())
-                  .append(" (").append(function.getParameterCount()).append(" params)")
-                  .append("\n");
+                  .append(" (").append(function.getParameterCount()).append(" params)\n");
             count++;
         }
 
@@ -284,6 +267,9 @@ public class ListFunctionsTool implements McpTool {
             }
         }
 
+        if ((long) offset + count < totalCount) {
+            result.append("\nMore results available; next offset: ").append((long) offset + count).append("\n");
+        }
         return result.toString();
     }
 }

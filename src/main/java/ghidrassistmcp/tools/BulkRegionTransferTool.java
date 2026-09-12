@@ -57,7 +57,7 @@ public class BulkRegionTransferTool implements McpTool {
         return "Transfer all named function labels from a source program to a target program " +
                "for a given address range. Auto-detects code offset between binaries, verifies each " +
                "match via size and opcode comparison, and optionally creates missing function definitions. " +
-               "Use for bulk cross-binary label transfer between different OS revisions of the same firmware.";
+               "Apply is atomic: any failed creation, rename or verification rolls back all changes made by this call.";
     }
 
     @Override
@@ -75,9 +75,9 @@ public class BulkRegionTransferTool implements McpTool {
         return new McpSchema.JsonSchema("object",
             Map.of(
                 "source_program", Map.of("type", "string",
-                    "description", "Name of the source program (with known symbols)"),
+                    "description", "Exact source name, project path, URL or program_id; ambiguous names fail"),
                 "target_program", Map.of("type", "string",
-                    "description", "Name of the stripped target program to label"),
+                    "description", "Exact target name, project path, URL or program_id; ambiguous names fail"),
                 "start_address", Map.of("type", "string",
                     "description", "Start of source address range (hex, e.g. \"0x00287200\")"),
                 "end_address", Map.of("type", "string",
@@ -137,8 +137,9 @@ public class BulkRegionTransferTool implements McpTool {
             codeOffset = ((Number) arguments.get("code_offset")).longValue();
 
         // --- Resolve programs ---
-        Program sourceProgram = findProgram(backend, sourceProgramName);
-        Program targetProgram = findProgram(backend, targetProgramName);
+        try (var sourceLease = ProgramSelection.lease(backend, sourceProgramName, currentProgram);
+             var targetLease = ProgramSelection.lease(backend, targetProgramName, currentProgram)) {
+        Program sourceProgram = sourceLease.program(), targetProgram = targetLease.program();
 
         if (sourceProgram == null) {
             return McpSchema.CallToolResult.builder()
@@ -196,6 +197,7 @@ public class BulkRegionTransferTool implements McpTool {
         // ========== PHASE C: Report ==========
         return buildReport(sourceProgramName, targetProgramName, startAddrStr, endAddrStr,
             detectedOffset, sampleCount, dryRun, createFunctions, sizeTolerance, transferResult);
+        } catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
     }
 
     // ==================== Phase A: Offset Detection ====================
@@ -353,6 +355,11 @@ public class BulkRegionTransferTool implements McpTool {
                                            double sizeTolerance) {
         TransferResult result = new TransferResult();
 
+        if (!dryRun && targetProgram.getCurrentTransactionInfo() != null) {
+            result.fatalError = "Target has an active transaction; retry after it finishes";
+            return result;
+        }
+
         Memory srcMem = sourceProgram.getMemory();
         Memory tgtMem = targetProgram.getMemory();
         AddressSpace tgtAddrSpace = targetProgram.getAddressFactory().getDefaultAddressSpace();
@@ -369,6 +376,10 @@ public class BulkRegionTransferTool implements McpTool {
 
             FunctionIterator funcIter = sourceProgram.getFunctionManager().getFunctions(startAddr, true);
             while (funcIter.hasNext()) {
+                if (Thread.currentThread().isInterrupted() || monitor.isCancelled()) {
+                    result.fatalError = "Transfer cancelled; remaining functions not processed";
+                    break;
+                }
                 Function srcFunc = funcIter.next();
                 if (srcFunc.getEntryPoint().compareTo(endAddr) > 0) break;
                 result.totalSourceFunctions++;
@@ -487,12 +498,18 @@ public class BulkRegionTransferTool implements McpTool {
             }
 
             if (!dryRun && txId >= 0) {
-                targetProgram.endTransaction(txId, true);
+                if (Thread.currentThread().isInterrupted() || monitor.isCancelled()) result.fatalError = "Transfer cancelled";
+                boolean commit = result.failures.isEmpty() && result.mismatches.isEmpty() && result.fatalError == null;
+                targetProgram.endTransaction(txId, commit);
+                txId = -1;
+                result.committed = commit;
+                if (!commit) result.recordRollback();
             }
 
         } catch (Exception e) {
             if (!dryRun && txId >= 0) {
                 targetProgram.endTransaction(txId, false);
+                result.recordRollback();
             }
             result.fatalError = "Transaction failed: " + e.getMessage();
         }
@@ -599,6 +616,8 @@ public class BulkRegionTransferTool implements McpTool {
         if (createFunctions && !dryRun) {
             report.append("  Functions created at target: ").append(tr.functionsCreated).append("\n");
         }
+        report.append("  Labels rolled back: ").append(tr.labelsRolledBack).append("\n");
+        report.append("  Functions rolled back: ").append(tr.functionsRolledBack).append("\n");
         report.append("\n");
 
         // Warnings
@@ -632,19 +651,21 @@ public class BulkRegionTransferTool implements McpTool {
             report.append("FATAL ERROR: ").append(tr.fatalError).append("\n");
         }
 
-        return McpSchema.CallToolResult.builder()
+        return McpSchema.CallToolResult.builder().isError(tr.fatalError != null || !dryRun && !tr.committed)
+            .structuredContent(Map.ofEntries(
+                Map.entry("source_program", sourceName), Map.entry("target_program", targetName),
+                Map.entry("dry_run", dryRun), Map.entry("committed", tr.committed),
+                Map.entry("matched", tr.matched), Map.entry("functions_created", tr.functionsCreated),
+                Map.entry("labels_rolled_back", tr.labelsRolledBack), Map.entry("functions_rolled_back", tr.functionsRolledBack),
+                Map.entry("failures", tr.failures), Map.entry("mismatches", tr.mismatches),
+                Map.entry("details", tr.details), Map.entry("fatal_error", tr.fatalError == null ? "" : tr.fatalError)))
             .addTextContent(report.toString())
             .build();
     }
 
     // ==================== Helpers ====================
 
-    private Program findProgram(GhidrAssistMCPBackend backend, String name) {
-        for (Program p : backend.getAllOpenPrograms()) {
-            if (p.getName().equals(name)) return p;
-        }
-        return null;
-    }
+
 
     // ==================== Result Classes ====================
 
@@ -662,12 +683,23 @@ public class BulkRegionTransferTool implements McpTool {
         int skippedAlreadyNamed = 0;
         int skippedUnnamed = 0;
         int functionsCreated = 0;
+        int labelsRolledBack = 0;
+        int functionsRolledBack = 0;
+        boolean committed = false;
         String fatalError = null;
 
         List<String> mismatches = new ArrayList<>();
         List<String> failures = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
         List<String> details = new ArrayList<>();
+
+        void recordRollback() {
+            labelsRolledBack = matched;
+            functionsRolledBack = functionsCreated;
+            matched = 0;
+            functionsCreated = 0;
+            details.replaceAll(detail -> detail.contains("LABELED") ? "ROLLED BACK: " + detail : detail);
+        }
 
         void addMismatch(String funcName, Address srcAddr, String reason) {
             mismatches.add(String.format("%s @ 0x%08x: %s",

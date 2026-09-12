@@ -12,7 +12,7 @@ After installing this extension, start an existing project/program with Ghidra's
 
 Replace the project directory/name and program with actual values. Ghidra's ordinary project lock rules apply; another process cannot simultaneously own the same writable project. The launcher backend also accepts a project without a seed program when invoked from a project-bound script context.
 
-`wait=true` keeps the script/server/JVM alive until cancellation, server stop, or an optional `completion_file` signal. The compatibility default remains `wait=false`, which starts the server for the remaining headless pipeline rather than holding the process open. The script ends its own program transaction before waiting, permitting subsequent MCP saves and VT transactions.
+`wait=true` keeps the script/server/JVM alive until cancellation, server stop, or an optional `completion_file` signal. Waiting is now the default; `wait=false` is rejected because returning to the headless pipeline can close the caller-owned project while MCP work still runs. Use the launcher as a post-script. Programmatic server callers may still start it without blocking when they explicitly own the surrounding project lifetime. The script ends its own program transaction before waiting, permitting subsequent MCP saves and VT transactions.
 
 `open_program` retains a consumer until `close_program` or shutdown. Repeated opens reuse the same requested version; historical versions and the current checkout stay distinct. Async tasks hold an additional consumer so closing an MCP program handle does not invalidate work already queued or running. The caller owns the project itself; backend shutdown does not close it.
 

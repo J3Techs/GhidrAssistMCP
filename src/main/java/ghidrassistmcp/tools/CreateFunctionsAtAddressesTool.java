@@ -35,7 +35,7 @@ public class CreateFunctionsAtAddressesTool implements McpTool {
         return "Create function definitions at specified addresses. " +
                "Disassembles bytes at each address first, then defines a function. " +
                "Skips addresses that already have a function defined. " +
-               "Use after discovering missing function definitions during cross-binary analysis.";
+               "Applies atomically: any failed address rolls back all changes made by this call.";
     }
 
     @Override
@@ -48,16 +48,18 @@ public class CreateFunctionsAtAddressesTool implements McpTool {
         return true;
     }
 
+    @Override public boolean isLongRunning() { return true; }
+
     @Override
     public McpSchema.JsonSchema getInputSchema() {
         return new McpSchema.JsonSchema("object",
             Map.of(
                 "target_program", Map.of("type", "string",
-                    "description", "Name of the program to create functions in"),
+                    "description", "Exact target program name, project path, URL or program_id; ambiguous names fail"),
                 "addresses", Map.of(
                     "type", "array",
                     "description", "Array of hex addresses to create functions at (e.g. [\"0x0024d618\", \"0x00287200\"])",
-                    "items", Map.of("type", "string")
+                    "items", Map.of("type", "string", "minLength", 1), "minItems", 1, "maxItems", 10000
                 ),
                 "dry_run", Map.of("type", "boolean",
                     "description", "If true, validate addresses without creating functions (default false)",
@@ -77,6 +79,18 @@ public class CreateFunctionsAtAddressesTool implements McpTool {
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram,
                                              GhidrAssistMCPBackend backend) {
+        return run(arguments, currentProgram, backend, null);
+    }
+
+    @Override
+    public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram,
+            GhidrAssistMCPBackend backend, ghidrassistmcp.tasks.McpTask task) {
+        return run(arguments, currentProgram, backend, task);
+    }
+
+    @SuppressWarnings("unchecked")
+    private McpSchema.CallToolResult run(Map<String, Object> arguments, Program currentProgram,
+            GhidrAssistMCPBackend backend, ghidrassistmcp.tasks.McpTask task) {
         if (backend == null) {
             return McpSchema.CallToolResult.builder()
                 .addTextContent("Backend context not available")
@@ -88,7 +102,8 @@ public class CreateFunctionsAtAddressesTool implements McpTool {
         if (arguments.get("dry_run") instanceof Boolean)
             dryRun = (Boolean) arguments.get("dry_run");
 
-        Program targetProgram = findProgram(backend, targetProgramName);
+        try (var targetLease = ProgramSelection.lease(backend, targetProgramName, currentProgram)) {
+        Program targetProgram = targetLease.program();
         if (targetProgram == null) {
             return McpSchema.CallToolResult.builder()
                 .addTextContent("Target program not found: " + targetProgramName)
@@ -102,11 +117,18 @@ public class CreateFunctionsAtAddressesTool implements McpTool {
                 .build();
         }
 
+        List<?> rawAddresses = (List<?>) addressesObj;
+        if (rawAddresses.isEmpty() || rawAddresses.size() > 10000 || rawAddresses.stream().anyMatch(x -> !(x instanceof String s) || s.isBlank()))
+            return ProjectToolSupport.error("addresses must contain 1..10000 nonblank hex strings");
         List<String> addresses = (List<String>) addressesObj;
+        if (!dryRun && targetProgram.getCurrentTransactionInfo() != null)
+            return ProjectToolSupport.error("Target has an active transaction; retry after it finishes");
 
+        int rolledBack = 0;
         int successCount = 0;
         int alreadyExistsCount = 0;
         int failCount = 0;
+        boolean cancelled = false;
         List<String> details = new ArrayList<>();
 
         int txId = -1;
@@ -115,9 +137,13 @@ public class CreateFunctionsAtAddressesTool implements McpTool {
         }
 
         try {
-            ConsoleTaskMonitor monitor = new ConsoleTaskMonitor();
+            ghidra.util.task.TaskMonitor monitor = task == null ? new ConsoleTaskMonitor()
+                : new ghidrassistmcp.tasks.McpTaskMonitor(task, 0, 100, "Create Functions");
 
             for (String addrStr : addresses) {
+                if (monitor.isCancelled() || Thread.currentThread().isInterrupted()) {
+                    cancelled = true; details.add("CANCELLED: remaining addresses not processed"); break;
+                }
                 try {
                     Address addr = targetProgram.getAddressFactory().getAddress(addrStr);
                     if (addr == null) {
@@ -179,7 +205,15 @@ public class CreateFunctionsAtAddressesTool implements McpTool {
             }
 
             if (!dryRun && txId >= 0) {
-                targetProgram.endTransaction(txId, true);
+                cancelled |= monitor.isCancelled() || Thread.currentThread().isInterrupted();
+                boolean commit = failCount == 0 && !cancelled;
+                targetProgram.endTransaction(txId, commit);
+                txId = -1;
+                if (!commit) {
+                    rolledBack = successCount;
+                    successCount = 0;
+                    details.replaceAll(detail -> detail.startsWith("OK ") ? "ROLLED BACK " + detail.substring(3) : detail);
+                }
             }
 
         } catch (Exception e) {
@@ -200,6 +234,7 @@ public class CreateFunctionsAtAddressesTool implements McpTool {
         result.append("\n");
         result.append("Total addresses: ").append(addresses.size()).append("\n");
         result.append("Created: ").append(successCount).append("\n");
+        result.append("Rolled back: ").append(rolledBack).append("\n");
         result.append("Already existed: ").append(alreadyExistsCount).append("\n");
         result.append("Failed: ").append(failCount).append("\n\n");
 
@@ -208,15 +243,14 @@ public class CreateFunctionsAtAddressesTool implements McpTool {
             result.append("  ").append(detail).append("\n");
         }
 
-        return McpSchema.CallToolResult.builder()
+        return McpSchema.CallToolResult.builder().isError(failCount > 0 || cancelled)
+            .structuredContent(Map.of("target_program", targetProgramName, "dry_run", dryRun, "created", successCount,
+                "rolled_back", rolledBack, "failed", failCount, "skipped", alreadyExistsCount,
+                "committed", !dryRun && failCount == 0 && !cancelled, "cancelled", cancelled, "details", details))
             .addTextContent(result.toString())
             .build();
+        } catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
     }
 
-    private Program findProgram(GhidrAssistMCPBackend backend, String name) {
-        for (Program p : backend.getAllOpenPrograms()) {
-            if (p.getName().equals(name)) return p;
-        }
-        return null;
-    }
+
 }

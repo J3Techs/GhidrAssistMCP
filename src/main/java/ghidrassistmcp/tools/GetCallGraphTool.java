@@ -1,188 +1,80 @@
-/*
- * MCP tool for getting function call graph.
- */
 package ghidrassistmcp.tools;
 
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-
-import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
 import ghidra.util.task.TaskMonitor;
 import ghidrassistmcp.McpTool;
 import io.modelcontextprotocol.spec.McpSchema;
 
-/**
- * MCP tool that gets the function call graph (callers and callees).
- */
+/** Bounded call graph shared by the legacy graph and xrefs entry points. */
 public class GetCallGraphTool implements McpTool {
-
-    @Override
-    public boolean isCacheable() {
-        return true;
+    @Override public boolean isCacheable() { return true; }
+    @Override public String getName() { return "get_call_graph"; }
+    @Override public String getDescription() {
+        return "Get callers/callees with depth 0-5 and an aggregate max_nodes output budget across both directions. "
+            + "Truncation is explicit; narrow direction/depth or choose another root to inspect remaining edges.";
     }
-
-    @Override
-    public String getName() {
-        return "get_call_graph";
-    }
-
-    @Override
-    public String getDescription() {
-        return "Get the function call graph showing callers and callees with specified depth";
-    }
-
-    @Override
-    public McpSchema.JsonSchema getInputSchema() {
-        return new McpSchema.JsonSchema("object",
-            Map.of(
-                "function", Map.of(
-                    "type", "string",
-                    "description", "Function identifier (name or address)"
-                ),
-                "depth", Map.of(
-                    "type", "integer",
-                    "description", "Optional: max graph depth (default 2, capped at 5)",
-                    "default", 2
-                ),
-                "direction", Map.of(
-                    "type", "string",
-                    "description", "Optional: which side of the call graph to return",
-                    "enum", List.of("both", "callers", "callees"),
-                    "default", "both"
-                )
-            ),
+    @Override public McpSchema.JsonSchema getInputSchema() {
+        return new McpSchema.JsonSchema("object", Map.of(
+            "function", Map.of("type", "string", "description", "Function address, containing address, or qualified name"),
+            "depth", Map.of("type", "integer", "minimum", 0, "maximum", 5, "default", 2),
+            "max_nodes", Map.of("type", "integer", "minimum", 1, "maximum", 10000, "default", 1000,
+                "description", "Maximum emitted node/edge rows in the whole response, including repeated nodes"),
+            "direction", Map.of("type", "string", "enum", List.of("both", "callers", "callees"), "default", "both")),
             List.of("function"), null, null, null);
     }
-
-    @Override
-    public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
-        if (currentProgram == null) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("No program currently loaded")
-                .build();
-        }
-
-        String functionIdentifier = (String) arguments.get("function");
-        int depth = 2; // Default depth
-        String direction = "both";
-
-        if (arguments.get("depth") instanceof Number) {
-            depth = ((Number) arguments.get("depth")).intValue();
-            depth = Math.min(depth, 5); // Limit max depth to avoid excessive output
-        }
-
-        if (arguments.get("direction") instanceof String) {
-            String dir = (String) arguments.get("direction");
-            if (dir != null && !dir.trim().isEmpty()) {
-                direction = dir.toLowerCase();
-            }
-        }
-
-        if (!direction.equals("both") && !direction.equals("callers") && !direction.equals("callees")) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Invalid direction. Use 'both', 'callers', or 'callees'")
-                .build();
-        }
-
-        // Find the function
-        Function function = findFunction(currentProgram, functionIdentifier);
-        if (function == null) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Function not found: " + functionIdentifier)
-                .build();
-        }
-
-        StringBuilder result = new StringBuilder();
-        result.append("Call Graph for: ").append(function.getName(true))
-              .append(" @ ").append(function.getEntryPoint()).append("\n\n");
-
-        Set<String> visited = new HashSet<>();
-
-        // Get callers (functions that call this function)
-        if (direction.equals("callers") || direction.equals("both")) {
-            result.append("## Calling Functions (Who calls this):\n");
-            buildCallerTree(currentProgram, function, depth, 0, visited, result);
-            result.append("\n");
-        }
-
-        visited.clear();
-
-        // Get callees (functions called by this function)
-        if (direction.equals("callees") || direction.equals("both")) {
-            result.append("## Called Functions (What this calls):\n");
-            buildCalleeTree(currentProgram, function, depth, 0, visited, result);
-        }
-
-        return McpSchema.CallToolResult.builder()
-            .addTextContent(result.toString())
-            .build();
-    }
-
-    private void buildCallerTree(Program program, Function function, int maxDepth, int currentDepth,
-                                  Set<String> visited, StringBuilder result) {
-        String indent = "  ".repeat(currentDepth);
-        String key = function.getEntryPoint().toString();
-
-        if (visited.contains(key)) {
-            result.append(indent).append("- ").append(function.getName(true))
-                  .append(" @ ").append(function.getEntryPoint())
-                  .append(" (recursive/already visited)\n");
-            return;
-        }
-
-        visited.add(key);
-        result.append(indent).append("- ").append(function.getName(true))
-              .append(" @ ").append(function.getEntryPoint()).append("\n");
-
-        if (currentDepth < maxDepth) {
-            Set<Function> callers = function.getCallingFunctions(TaskMonitor.DUMMY);
-            for (Function caller : callers) {
-                buildCallerTree(program, caller, maxDepth, currentDepth + 1, visited, result);
-            }
-        }
-    }
-
-    private void buildCalleeTree(Program program, Function function, int maxDepth, int currentDepth,
-                                  Set<String> visited, StringBuilder result) {
-        String indent = "  ".repeat(currentDepth);
-        String key = function.getEntryPoint().toString();
-
-        if (visited.contains(key)) {
-            result.append(indent).append("- ").append(function.getName(true))
-                  .append(" @ ").append(function.getEntryPoint())
-                  .append(" (recursive/already visited)\n");
-            return;
-        }
-
-        visited.add(key);
-        result.append(indent).append("- ").append(function.getName(true))
-              .append(" @ ").append(function.getEntryPoint()).append("\n");
-
-        if (currentDepth < maxDepth) {
-            Set<Function> callees = function.getCalledFunctions(TaskMonitor.DUMMY);
-            for (Function callee : callees) {
-                buildCalleeTree(program, callee, maxDepth, currentDepth + 1, visited, result);
-            }
-        }
-    }
-
-    private Function findFunction(Program program, String identifier) {
-        // Try as address first
+    @Override public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program program) {
         try {
-            Address addr = program.getAddressFactory().getAddress(identifier);
-            if (addr != null) {
-                Function func = program.getFunctionManager().getFunctionAt(addr);
-                if (func != null) return func;
-            }
-        } catch (Exception e) {
-            // Not an address
+            int depth = QueryPageBounds.integer(arguments, "depth", 2, 0, 5);
+            int maximum = QueryPageBounds.integer(arguments, "max_nodes", 1000, 1, 10000);
+            String direction = arguments.getOrDefault("direction", "both") instanceof String value ? value : "";
+            if (!List.of("both", "callers", "callees").contains(direction))
+                return ProjectToolSupport.error("Invalid direction. Use 'both', 'callers', or 'callees'");
+            String identifier = arguments.get("function") instanceof String value ? value : null;
+            Function function = FunctionLookup.resolve(program, identifier);
+            if (function == null) return ProjectToolSupport.error("Function not found: " + identifier);
+            return McpSchema.CallToolResult.builder().addTextContent(render(function, depth, direction, maximum)).build();
+        } catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
+    }
+    static String render(Function function, int depth, String direction, int maximum) {
+        var budget = new Budget(maximum);
+        budget.text.append("Call Graph for: ").append(function.getName(true)).append(" @ ")
+            .append(function.getEntryPoint()).append("\n\n");
+        if (!direction.equals("callees")) {
+            budget.text.append("## Calling Functions (Who calls this):\n");
+            visit(function, depth, 0, true, new HashSet<>(), budget);
+            budget.text.append("\n");
         }
-
-        // Try as function name
-        return FunctionLookup.findByName(program, identifier);
+        if (!direction.equals("callers")) {
+            budget.text.append("## Called Functions (What this calls):\n");
+            visit(function, depth, 0, false, new HashSet<>(), budget);
+        }
+        return budget.text.toString();
+    }
+    private static void visit(Function function, int maxDepth, int depth, boolean callers, Set<String> visited, Budget budget) {
+        if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException("Graph query cancelled");
+        if (budget.rows == budget.maximum || budget.text.full()) { budget.text.truncate(); return; }
+        budget.rows++;
+        String key = function.getEntryPoint().toString();
+        boolean first = visited.add(key);
+        budget.text.append("  ".repeat(depth)).append("- ").append(function.getName(true))
+            .append(" @ ").append(function.getEntryPoint())
+            .append(first ? "\n" : " (recursive/already visited)\n");
+        if (!first || depth == maxDepth || budget.text.full()) return;
+        Set<Function> adjacent = callers ? function.getCallingFunctions(TaskMonitor.DUMMY) : function.getCalledFunctions(TaskMonitor.DUMMY);
+        for (Function next : adjacent) {
+            if (budget.rows == budget.maximum || budget.text.full()) { budget.text.truncate(); break; }
+            visit(next, maxDepth, depth + 1, callers, visited, budget);
+        }
+    }
+    private static final class Budget {
+        final BoundedQueryText text = new BoundedQueryText();
+        final int maximum;
+        int rows;
+        Budget(int maximum) { this.maximum = maximum; }
     }
 }

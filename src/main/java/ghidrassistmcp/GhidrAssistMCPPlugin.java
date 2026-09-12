@@ -68,7 +68,8 @@ public class GhidrAssistMCPPlugin extends ProgramPlugin {
 
 		// Now create and register the UI provider
 		try {
-			provider = new GhidrAssistMCPProvider(tool, this);
+            provider = new GhidrAssistMCPProvider(tool, this);
+            manager.registerPlugin(this, provider);
 			Msg.info(this, "Provider created successfully");
 
 			// Register provider with tool - this adds it to Window menu

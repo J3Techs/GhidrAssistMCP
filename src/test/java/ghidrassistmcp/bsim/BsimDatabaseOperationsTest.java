@@ -39,7 +39,7 @@ class BsimDatabaseOperationsTest {
         Path settings = temporary.resolve("settings");
         Path databaseFile = temporary.resolve("fixture");
         BsimConnections connections = new BsimConnections(settings);
-        BsimContext context = new BsimContext(null, null, connections, temporary, null);
+        try (BsimContext context = new BsimContext(null, null, connections, temporary, null)) {
         String url = databaseFile.toUri().toString();
         Map<String, Object> target = Map.of("database_url", url);
 
@@ -66,6 +66,7 @@ class BsimDatabaseOperationsTest {
         assertEquals(true, dropped.get("dropped"));
         assertFalse(java.nio.file.Files.exists(databaseFile.resolveSibling(
             databaseFile.getFileName() + ".mv.db")));
+        }
     }
 
     @Test
@@ -73,7 +74,7 @@ class BsimDatabaseOperationsTest {
         Path settings = temporary.resolve("settings");
         Path databaseFile = temporary.resolve("collision");
         BsimConnections connections = new BsimConnections(settings);
-        BsimContext context = new BsimContext(null, null, connections, temporary, null);
+        try (BsimContext context = new BsimContext(null, null, connections, temporary, null)) {
         String url = databaseFile.toUri().toString();
         BsimOperation create = operation("create_database");
         boolean created = false;
@@ -95,6 +96,7 @@ class BsimDatabaseOperationsTest {
                 operation("drop_database").handler().execute(context,
                     Map.of("database_url", url, "confirm", true), TaskMonitor.DUMMY);
             }
+        }
         }
     }
 

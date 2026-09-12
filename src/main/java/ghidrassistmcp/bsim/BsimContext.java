@@ -10,7 +10,6 @@ import ghidra.features.bsim.query.FunctionDatabase;
 import ghidra.program.model.listing.Program;
 import ghidra.util.task.TaskMonitor;
 import ghidrassistmcp.GhidrAssistMCPBackend;
-import ghidrassistmcp.GhidrAssistMCPManager;
 
 /** Per-operation program ownership, database access and durable checkpoints. */
 public final class BsimContext implements AutoCloseable {
@@ -24,6 +23,11 @@ public final class BsimContext implements AutoCloseable {
             Path artifacts, BsimJobs.Job job) {
         this.current = current != null && !current.isClosed() ? current : null; this.backend = backend; this.connections = connections;
         this.artifacts = artifacts; this.job = job;
+        if (this.current != null) {
+            Object consumer = new Object();
+            if (!this.current.addConsumer(consumer)) throw new IllegalStateException("Program closed before BSim context acquired ownership");
+            cleanup.add(() -> this.current.release(consumer));
+        }
     }
     public Program program() { return current; }
     public GhidrAssistMCPBackend backend() { return backend; }
@@ -82,7 +86,7 @@ public final class BsimContext implements AutoCloseable {
     }
     public List<ProgramHandle> resolvePrograms(Map<String, Object> args, TaskMonitor monitor, boolean forWrite) throws Exception {
         Project project = activeProject();
-        ProjectData data = project != null ? project.getProjectData() : current != null && current.getDomainFile().getParent() != null
+        ProjectData data = project != null ? project.getProjectData() : backend == null && current != null && current.getDomainFile().getParent() != null
             ? current.getDomainFile().getParent().getProjectData() : null;
         if (args.containsKey("project_url")) {
             URL url = new URL(BsimSupport.text(args, "project_url"));
@@ -165,13 +169,11 @@ public final class BsimContext implements AutoCloseable {
     }
     private Program findOpen(String name) {
         var programs = backend != null ? backend.getAllOpenPrograms() : current == null ? List.<Program>of() : List.of(current);
-        var matches = programs.stream().filter(p -> !p.isClosed() && (p.getName().equals(name) || p.getDomainFile().getPathname().equals(name))).toList();
-        if (matches.size() > 1) throw new IllegalArgumentException("Ambiguous program name; use exact project path: " + name);
-        return matches.isEmpty() ? null : matches.get(0);
+        try { return ghidrassistmcp.ProgramIdentity.resolve(name, programs); }
+        catch (ghidrassistmcp.ProgramIdentity.NotOpenException missing) { return null; }
     }
-    private static Project activeProject() {
-        var tool = GhidrAssistMCPManager.getInstance().getActiveTool();
-        return tool == null ? ghidra.framework.main.AppInfo.getActiveProject() : tool.getProject();
+    private Project activeProject() {
+        return backend != null ? backend.getProject() : ghidra.framework.main.AppInfo.getActiveProject();
     }
     private static String projectPath(String value) {
         String path = value.replace('\\', '/');
@@ -201,7 +203,9 @@ public final class BsimContext implements AutoCloseable {
                 monitor.checkCancelled();
                 if (!acquired) {
                     if (job != null) job.validateIdentity("file:" + identity(), fileIdentity());
-                    if (program != null) program.addConsumer(consumer);
+                    if (program != null) {
+                        if (!program.addConsumer(consumer)) throw new IllegalStateException("Program closed before ownership could be acquired");
+                    }
                     else {
                         program = file.isOpen() ? (Program) file.getOpenedDomainObject(consumer) : null;
                         if (program == null) program = (Program) (write ? file.getDomainObject(consumer, false, false, monitor)
@@ -223,7 +227,8 @@ public final class BsimContext implements AutoCloseable {
             Program target = program();
             if (!target.isChangeable() || file.isReadOnly()) throw new IllegalStateException("Program is read-only; checkout may be required");
             if (initiallyOpen) return;
-            var tool = GhidrAssistMCPManager.getInstance().getActiveTool();
+            var plugin = backend == null ? null : backend.getActivePlugin();
+            var tool = plugin == null ? null : plugin.getTool();
             var manager = tool == null ? null : tool.getService(ghidra.app.services.ProgramManager.class);
             if (manager == null) throw new IllegalStateException("Open the target in CodeBrowser before applying matches; unsaved changes need an owning tool");
             ghidra.util.SystemUtilities.runSwingNow(() -> manager.openProgram(target));

@@ -9,12 +9,10 @@ import ghidrassistmcp.GhidrAssistMCPHeadlessServer;
 
 /**
  * Headless GhidraScript that starts the GhidrAssistMCP server.
- * Designed to be run as a -preScript before GhidrAssistHL scripts so that
- * the MCP server is available for tool calls during ReAct analysis.
+ * Run as a post-script to retain the caller-owned project for the complete MCP session.
  *
  * Usage in analyzeHeadless:
- *   -preScript GAMCPStartServerScript.java
- *   -postScript GAHLQueryScript.java ...
+ *   -postScript GAMCPStartServerScript.java wait=true
  */
 public class GAMCPStartServerScript extends GhidraScript {
 
@@ -27,12 +25,12 @@ public class GAMCPStartServerScript extends GhidraScript {
 
         String host = "localhost";
         int port = 8080;
-        boolean waitForClients = false;
         String completionFile = null;
         String toolProfile = "default";
 
         // Parse optional arguments: host=... port=... wait=true|false
         String[] args = getScriptArgs();
+        validateWaitMode(args);
         if (args != null) {
             for (String arg : args) {
                 if (arg.startsWith("host=")) {
@@ -43,8 +41,6 @@ public class GAMCPStartServerScript extends GhidraScript {
                     } catch (NumberFormatException e) {
                         Msg.warn(this, "Invalid port argument, using default 8080");
                     }
-                } else if (arg.startsWith("wait=")) {
-                    waitForClients = Boolean.parseBoolean(arg.substring(5));
                 } else if (arg.startsWith("completion_file=")) {
                     completionFile = arg.substring("completion_file=".length()).trim();
                 } else if (arg.startsWith("tool_profile=")) {
@@ -55,26 +51,25 @@ public class GAMCPStartServerScript extends GhidraScript {
 
         GhidrAssistMCPHeadlessServer mcpServer = GhidrAssistMCPHeadlessServer.getInstance();
 
-        if (mcpServer.isRunning()) {
-            Msg.info(this, "MCP server already running, updating program reference");
+        boolean ownedSession = !mcpServer.isRunning();
+        try {
+            Msg.info(this, "Starting headless MCP server for project: " + state.getProject().getProjectLocator());
             mcpServer.start(currentProgram, state.getProject(), host, port, toolProfile);
-            if (waitForClients) {
-                // Release GhidraScript.start()'s transaction before blocking so
-                // MCP saves, repository locks, and VT work can proceed.
-                end(true);
-                waitUntilCancelled(mcpServer, completionFile);
-            }
-            return;
+            ownedSession = true;
+            Msg.info(this, "Headless MCP server ready on " + host + ":" + port);
+            // Release the launcher's transaction while keeping its project ownership scope alive.
+            end(true);
+            waitUntilCancelled(mcpServer, completionFile);
+        } finally {
+            // Also covers partial startup and transaction-release failures.
+            if (ownedSession) mcpServer.stopAndAwaitWorkers();
         }
+    }
 
-        Msg.info(this, "Starting headless MCP server for project: " + state.getProject().getProjectLocator());
-        mcpServer.start(currentProgram, state.getProject(), host, port, toolProfile);
-        Msg.info(this, "Headless MCP server ready on " + host + ":" + port);
-        if (waitForClients) {
-                // Do not hold the script transaction while the MCP server waits.
-                end(true);
-                waitUntilCancelled(mcpServer, completionFile);
-        }
+    static void validateWaitMode(String[] args) {
+        if (args == null) return;
+        for (String arg : args) if (arg.startsWith("wait=") && !arg.equalsIgnoreCase("wait=true"))
+            throw new IllegalArgumentException("The headless launcher requires wait=true (the default) to retain its caller-owned project until all MCP workers stop");
     }
 
     private void waitUntilCancelled(GhidrAssistMCPHeadlessServer mcpServer, String completionFile) {
@@ -89,8 +84,6 @@ public class GAMCPStartServerScript extends GhidraScript {
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-        } finally {
-            mcpServer.stop();
         }
     }
 }

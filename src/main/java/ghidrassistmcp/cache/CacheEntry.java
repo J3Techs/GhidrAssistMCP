@@ -18,19 +18,28 @@ public class CacheEntry {
     private final String programName;
     private final String cacheKey;
     private volatile int hitCount;
+    private final long serializedBytes;
 
     /**
      * Create a new cache entry
      */
     public CacheEntry(String cacheKey, McpSchema.CallToolResult result,
                       String programName, long programModificationNumber) {
+        this(cacheKey, result, programName, programModificationNumber, 0);
+    }
+
+    public CacheEntry(String cacheKey, McpSchema.CallToolResult result,
+                      String programName, long programModificationNumber, long serializedBytes) {
         this.cacheKey = cacheKey;
         this.result = result;
         this.programName = programName;
         this.programModificationNumber = programModificationNumber;
         this.createdAt = Instant.now();
         this.hitCount = 0;
+        this.serializedBytes = serializedBytes;
     }
+
+    public long getSerializedBytes() { return serializedBytes; }
 
     /**
      * Get the cached result

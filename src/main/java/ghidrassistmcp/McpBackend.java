@@ -54,4 +54,13 @@ public interface McpBackend {
      * Get server capabilities
      */
     McpSchema.ServerCapabilities getCapabilities();
+
+    /** Guidance advertised during protocol initialization; independent of any particular client. */
+    default String getInstructions() {
+        return "Start with runtime_capabilities and list_binaries; select an exact program_id for related operations. "
+            + "Use bounded queries and explicit pagination. If a tool returns a task ID, use wait_task for bounded "
+            + "waiting and get_task_status for its retained result. A wait timeout or cancellation request does not "
+            + "prove execution stopped. Inspect dirty/saved state and use save_program when persistence is requested. "
+            + "Application task IDs are not negotiated MCP Tasks extension handles.";
+    }
 }

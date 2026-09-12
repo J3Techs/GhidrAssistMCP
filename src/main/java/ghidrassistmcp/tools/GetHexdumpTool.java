@@ -37,7 +37,7 @@ public class GetHexdumpTool implements McpTool {
         return new McpSchema.JsonSchema("object",
             Map.of(
                 "address", new McpSchema.JsonSchema("string", null, null, null, null, null),
-                "len", new McpSchema.JsonSchema("number", null, null, null, null, null)
+                "len", Map.of("type", "integer", "minimum", 1, "maximum", 65536)
             ),
             List.of("address", "len"), null, null, null);
     }
@@ -46,58 +46,25 @@ public class GetHexdumpTool implements McpTool {
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
         if (currentProgram == null) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("No program currently loaded")
                 .build();
         }
 
         // Get and validate address parameter
-        String addressStr = (String) arguments.get("address");
+        String addressStr = arguments.get("address") instanceof String value ? value : null;
         if (addressStr == null) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("address parameter is required")
                 .build();
         }
 
-        // Get and validate length parameter
-        Object lenObj = arguments.get("len");
-        if (lenObj == null) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("len parameter is required")
-                .build();
-        }
-
-        int length;
+        final int length;
         try {
-            // Handle both Integer and Double (JSON numbers can be either)
-            if (lenObj instanceof Integer) {
-                length = (Integer) lenObj;
-            } else if (lenObj instanceof Double) {
-                length = ((Double) lenObj).intValue();
-            } else if (lenObj instanceof Long) {
-                length = ((Long) lenObj).intValue();
-            } else {
-                return McpSchema.CallToolResult.builder()
-                    .addTextContent("len parameter must be a number")
-                    .build();
-            }
-
-            if (length <= 0) {
-                return McpSchema.CallToolResult.builder()
-                    .addTextContent("len must be greater than 0")
-                    .build();
-            }
-
-            // Limit maximum length to prevent excessive output
-            if (length > 65536) {
-                return McpSchema.CallToolResult.builder()
-                    .addTextContent("len exceeds maximum allowed value of 65536 bytes")
-                    .build();
-            }
-        } catch (Exception e) {
-            return McpSchema.CallToolResult.builder()
-                .addTextContent("Invalid len parameter: " + e.getMessage())
-                .build();
-        }
+            if (!arguments.containsKey("len")) return ProjectToolSupport.error("len parameter is required");
+            length = QueryPageBounds.integer(arguments, "len", 1, 1, 65536);
+        } catch (IllegalArgumentException e) { return ProjectToolSupport.error(e.getMessage()); }
 
         // Parse the address
         Address address;
@@ -105,23 +72,26 @@ public class GetHexdumpTool implements McpTool {
             address = currentProgram.getAddressFactory().getAddress(addressStr);
             if (address == null) {
                 return McpSchema.CallToolResult.builder()
-                    .addTextContent("Invalid address format: " + addressStr)
+                    .isError(true).addTextContent("Invalid address format: " + addressStr)
                     .build();
             }
         } catch (Exception e) {
             return McpSchema.CallToolResult.builder()
-                .addTextContent("Invalid address format: " + addressStr + " - " + e.getMessage())
+                .isError(true).addTextContent("Invalid address format: " + addressStr + " - " + e.getMessage())
                 .build();
         }
 
         // Generate the hexdump
         try {
+            address.addNoWrap(length - 1L);
             String hexdump = generateHexdump(currentProgram, address, length);
             return McpSchema.CallToolResult.builder()
+                .isError(false)
                 .addTextContent(hexdump)
                 .build();
         } catch (Exception e) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("Error generating hexdump: " + e.getMessage())
                 .build();
         }
@@ -131,49 +101,50 @@ public class GetHexdumpTool implements McpTool {
      * Generate a hexdump in standard format with hex and ASCII representation.
      * Format: ADDRESS  HEX_BYTES (16 per line, grouped by 8)  |ASCII|
      */
-    private String generateHexdump(Program program, Address startAddr, int length) {
+    private String generateHexdump(Program program, Address startAddr, int length) throws ghidra.program.model.address.AddressOverflowException {
         StringBuilder result = new StringBuilder();
         Memory memory = program.getMemory();
 
         result.append("Hexdump at ").append(startAddr).append(" (").append(length).append(" bytes):\n\n");
 
         int bytesRead = 0;
-        Address currentAddr = startAddr;
+        int unreadable = 0;
 
         while (bytesRead < length) {
             // Calculate how many bytes to read on this line
             int bytesToRead = Math.min(BYTES_PER_LINE, length - bytesRead);
             byte[] lineBytes = new byte[bytesToRead];
+            boolean[] readable = new boolean[bytesToRead];
 
             // Read the bytes for this line
             int actualBytesRead = 0;
             for (int i = 0; i < bytesToRead; i++) {
                 try {
-                    lineBytes[i] = memory.getByte(currentAddr);
-                    currentAddr = currentAddr.add(1);
+                    lineBytes[i] = memory.getByte(startAddr.addNoWrap(bytesRead + i));
+                    readable[i] = true;
                     actualBytesRead++;
                 } catch (MemoryAccessException e) {
                     // If we can't read a byte, mark it as unreadable
-                    lineBytes[i] = 0;
-                    currentAddr = currentAddr.add(1);
+                    unreadable++;
                     actualBytesRead++;
                 }
             }
 
             // Format the line
-            result.append(formatHexdumpLine(startAddr.add(bytesRead), lineBytes, actualBytesRead));
+            result.append(formatHexdumpLine(startAddr.addNoWrap(bytesRead), lineBytes, readable, actualBytesRead));
             result.append("\n");
 
             bytesRead += actualBytesRead;
         }
 
+        result.append("Unreadable bytes: ").append(unreadable).append(" (?? in hex, ? in ASCII).\n");
         return result.toString();
     }
 
     /**
      * Format a single line of the hexdump.
      */
-    private String formatHexdumpLine(Address lineAddr, byte[] bytes, int validBytes) {
+    private String formatHexdumpLine(Address lineAddr, byte[] bytes, boolean[] readable, int validBytes) {
         StringBuilder line = new StringBuilder();
 
         if ( lineAddr.getOffset() > (1L << 32)) {
@@ -187,7 +158,7 @@ public class GetHexdumpTool implements McpTool {
         // Hex bytes (16 per line, with space after 8th byte)
         for (int i = 0; i < BYTES_PER_LINE; i++) {
             if (i < validBytes) {
-                line.append(String.format("%02x ", bytes[i] & 0xFF));
+                line.append(readable[i] ? String.format("%02x ", bytes[i] & 0xFF) : "?? ");
             } else {
                 line.append("   "); // 3 spaces for missing bytes
             }
@@ -201,6 +172,7 @@ public class GetHexdumpTool implements McpTool {
         // ASCII representation
         line.append(" |");
         for (int i = 0; i < validBytes; i++) {
+            if (!readable[i]) { line.append('?'); continue; }
             char c = (char) (bytes[i] & 0xFF);
             // Print printable ASCII characters, otherwise use '.'
             if (c >= 32 && c <= 126) {

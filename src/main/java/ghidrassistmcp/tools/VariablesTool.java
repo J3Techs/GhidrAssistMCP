@@ -114,7 +114,7 @@ public class VariablesTool implements McpTool {
     @Override
     public McpSchema.CallToolResult execute(Map<String, Object> arguments, Program currentProgram) {
         if (currentProgram == null) {
-            return result("No program currently loaded");
+            return ProjectToolSupport.error("No program currently loaded");
         }
         String action = (String) arguments.get("action");
         if (action == null) return result("action is required");
@@ -256,48 +256,16 @@ public class VariablesTool implements McpTool {
         }
     }
 
-    private McpSchema.CallToolResult executeRetype(Map<String, Object> arguments, Program program) {
-        String functionName = (String) arguments.get("function_name");
-        String variableName = (String) arguments.get("variable_name");
-        String dataTypeName = (String) arguments.get("data_type");
-        if (functionName == null || variableName == null || dataTypeName == null) {
-            return result("function_name, variable_name, and data_type are required for retype");
-        }
+    private McpSchema.CallToolResult executeRetype(Map<String, Object> args, Program program) {
+        return VariableRetypeSupport.execute(decompilerService, args, program, new ghidra.util.task.TaskMonitorAdapter(true));
+    }
 
-        Function function = findFunction(program, functionName);
-        if (function == null) return result("Function not found: " + functionName);
-
-        DataTypeManager dtm = program.getDataTypeManager();
-        DataType dataType = dtm.getDataType("/" + dataTypeName);
-        if (dataType == null) dataType = dtm.getDataType(dataTypeName);
-        if (dataType == null) return result("Data type not found: " + dataTypeName);
-
-        try (DecompilerSession session = decompilerService.open(program)) {
-            DecompileResults results = session.decompiler().decompileFunction(function,
-                session.options().getDefaultTimeout(), TaskMonitor.DUMMY);
-            if (!results.isValid()) return result("Decompilation failed");
-
-            HighFunction hf = results.getHighFunction();
-            if (hf == null) return result("Could not get high function");
-
-            Iterator<HighSymbol> symbols = hf.getLocalSymbolMap().getSymbols();
-            while (symbols.hasNext()) {
-                HighSymbol sym = symbols.next();
-                if (sym.getName().equals(variableName)) {
-                    int txId = program.startTransaction("Retype Variable");
-                    try {
-                        ghidra.program.model.pcode.HighFunctionDBUtil.updateDBVariable(
-                            sym, null, dataType, SourceType.USER_DEFINED);
-                        program.endTransaction(txId, true);
-                        return result("Retyped '" + variableName + "' to " + dataType.getName() + " in " + functionName);
-                    } catch (Exception e) {
-                        program.endTransaction(txId, false);
-                        return result("Error retyping: " + e.getMessage());
-                    }
-                }
-            }
-            return result("Variable '" + variableName + "' not found in " + functionName);
-        }
+    @Override public McpSchema.CallToolResult execute(Map<String, Object> args, Program program,
+            ghidrassistmcp.GhidrAssistMCPBackend backend, ghidrassistmcp.tasks.McpTask task) {
+        if ("retype".equalsIgnoreCase(String.valueOf(args.get("action"))))
+            return VariableRetypeSupport.execute(decompilerService, args, program,
+                task == null ? new ghidra.util.task.TaskMonitorAdapter(true) : new ghidrassistmcp.tasks.McpTaskMonitor(task, 0, 100, "Retype Variable"));
+        return execute(args, program);
     }
 
     private McpSchema.CallToolResult executeSetPrototype(Map<String, Object> arguments, Program program) {

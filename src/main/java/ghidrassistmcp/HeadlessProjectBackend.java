@@ -94,8 +94,7 @@ public class HeadlessProjectBackend extends GhidrAssistMCPBackend {
     public void shutdownHeadlessPrograms() {
         synchronized (this) { stopping = true; }
         // Never wait under the backend monitor: workers need current/list/open access.
-        getTaskManager().shutdown();
-        ghidrassistmcp.bsim.BsimRuntime.closeIfInitialized();
+        shutdownWorkers();
         ghidrassistmcp.vt.VTTool.closeProjectSessions(project);
         synchronized (this) {
             for (Program program : new ArrayList<>(programs)) {

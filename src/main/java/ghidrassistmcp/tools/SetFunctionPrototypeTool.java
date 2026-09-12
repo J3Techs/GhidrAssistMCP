@@ -7,7 +7,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import javax.swing.SwingUtilities;
 
 import ghidra.app.cmd.function.ApplyFunctionSignatureCmd;
 import ghidra.app.util.parser.FunctionSignatureParser;
@@ -63,6 +62,7 @@ public class SetFunctionPrototypeTool implements McpTool {
         // Fallback for when backend reference is not available
         if (currentProgram == null) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("No program currently loaded")
                 .build();
         }
@@ -72,12 +72,14 @@ public class SetFunctionPrototypeTool implements McpTool {
 
         if (functionAddrStr == null || functionAddrStr.isEmpty()) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("function_address parameter is required")
                 .build();
         }
 
         if (prototype == null || prototype.isEmpty()) {
             return McpSchema.CallToolResult.builder()
+                .isError(true)
                 .addTextContent("prototype parameter is required")
                 .build();
         }
@@ -86,6 +88,7 @@ public class SetFunctionPrototypeTool implements McpTool {
         PrototypeResult result = setFunctionPrototype(currentProgram, functionAddrStr, prototype);
 
         return McpSchema.CallToolResult.builder()
+            .isError(!result.success)
             .addTextContent(result.success ?
                 "Successfully set function prototype: " + prototype :
                 "Failed to set function prototype: " + result.errorMessage)
@@ -128,10 +131,11 @@ public class SetFunctionPrototypeTool implements McpTool {
         final AtomicBoolean success = new AtomicBoolean(false);
 
         try {
-            SwingUtilities.invokeAndWait(() -> 
-                applyFunctionPrototype(program, functionAddrStr, prototype, success, errorMessage));
+            // This is a database command, not a UI operation. Keep execution on the
+            // caller that owns the mutation guard instead of waiting for the EDT.
+            applyFunctionPrototype(program, functionAddrStr, prototype, success, errorMessage);
         } catch (Exception e) {
-            String msg = "Failed to set function prototype on Swing thread: " + e.getMessage();
+            String msg = "Failed to set function prototype: " + e.getMessage();
             errorMessage.append(msg);
             Msg.error(this, msg, e);
         }
@@ -163,9 +167,6 @@ public class SetFunctionPrototypeTool implements McpTool {
             }
 
             Msg.info(this, "Setting prototype for function " + func.getName() + ": " + prototype);
-
-            // Store original prototype as a comment for reference
-            addPrototypeComment(program, func, prototype);
 
             // Use proper function signature parsing and application
             parseFunctionSignatureAndApply(program, addr, prototype, success, errorMessage);
@@ -210,6 +211,7 @@ public class SetFunctionPrototypeTool implements McpTool {
             boolean cmdResult = cmd.applyTo(program, new ConsoleTaskMonitor());
 
             if (cmdResult) {
+                addPrototypeComment(program, program.getFunctionManager().getFunctionAt(addr), prototype);
                 success.set(true);
                 Msg.info(this, "Successfully applied function signature");
             } else {
@@ -230,21 +232,11 @@ public class SetFunctionPrototypeTool implements McpTool {
      * Add prototype as a comment for reference
      */
     private void addPrototypeComment(Program program, Function function, String prototype) {
-        int transactionId = program.startTransaction("Add prototype comment");
-        boolean committed = false;
-        try {
-            String currentComment = function.getComment();
-            String newComment = "Applied prototype: " + prototype;
-            if (currentComment != null && !currentComment.isEmpty()) {
-                newComment = currentComment + "\n" + newComment;
-            }
-            function.setComment(newComment);
-            committed = true;
-        } catch (Exception e) {
-            Msg.warn(this, "Could not add prototype comment: " + e.getMessage());
-        } finally {
-            program.endTransaction(transactionId, committed);
-        }
+        // Called only inside the signature transaction; failures must roll it back.
+        String currentComment = function.getComment();
+        String newComment = "Applied prototype: " + prototype;
+        if (currentComment != null && !currentComment.isEmpty()) newComment = currentComment + "\n" + newComment;
+        function.setComment(newComment);
     }
     
 }

@@ -22,6 +22,8 @@ final class ToolAlias implements McpTool {
         return "Compatibility alias for " + delegate.getName() + ". " + delegate.getDescription();
     }
     @Override public McpSchema.JsonSchema getInputSchema() { return delegate.getInputSchema(); }
+    @Override public Map<String, Object> getInputSchemaMap() { return delegate.getInputSchemaMap(); }
+    @Override public Map<String, Object> getOutputSchema() { return delegate.getOutputSchema(); }
     @Override public boolean isReadOnly() { return delegate.isReadOnly(); }
     @Override public boolean isDestructive() { return delegate.isDestructive(); }
     @Override public boolean isIdempotent() { return delegate.isIdempotent(); }
