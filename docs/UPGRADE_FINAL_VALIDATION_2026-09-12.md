@@ -41,6 +41,22 @@ Claude Code 2.1.269 passed plugin validation and isolated discovery with the exp
 
 The client-specific reports are [Claude integration](CLAUDE_INTEGRATION.md) and [Grok integration](GROK_INTEGRATION.md). They record the final client attempts and limitations; successful server fixtures must not be substituted for an uncompleted client workflow. Client traces are local evidence and are not committed with authentication/session material.
 
+Grok 1.0.30 also completed native prototype application with bounded returned C and async save, followed by exact-ID close/reopen and stored-prototype confirmation. It used an isolated project config under the already trusted repository, disabled unrelated MCP connections and preserved global configuration. The captured Grok JSON contains its final step-by-step report (preceded by startup warnings); server logs independently record those tool invocations. It is not a raw complete MCP wire transcript. Claude's capture is a streaming JSONL transcript. These client runs used preceding fixture builds; the final packaged build subsequently clarified the prototype tool's name-preservation description without changing that operation's implementation.
+
+Local evidence hashes:
+
+| Capture | SHA-256 |
+|---|---|
+| Claude round-two mutation JSONL | `9b33498faf0a74f5000cef21e1cb3b265616a83a9d10a99ae562040036c36891` |
+| Grok packaged mutation report | `fd2484ddc4f14a4bec6290e052837706f26a9989f347844fa3869ddad0069ea1` |
+| Grok packaged close/reopen report | `6d78caa7a4ce4540c32051256649a6bac8bc3c134c36dafad2e23ed0e77cd565` |
+| Claude packaged PORT JSONL | `c810c0e29ae4343c54aebc7097fd52ddf8e102ada378de4146207239ac402646` |
+| Grok shared PORT read report | `ed217b8023f5c36b337387650c5b45f2d307c37db4d4769adcc81d8f37d42bb7` |
+
+Cross-client PORT acceptance also passed. Claude first observed a truthful preserved/no-op outcome on the existing analyst-named target, with no checkpoint created. A fresh preview with explicit replacement policies then committed one selected row, verified the checkpoint, saved and rediscovered target version 3, and recovered the verified marker after consumer close/reopen. Source fingerprint/revision stayed unchanged. Grok independently discovered that exact target and read the same operation ID, verified checkpoint and matching current destination fingerprint without mutation. Source and destination fingerprints need not equal each other: each is compared against its own recorded state.
+
+After validation, all root-owned disposable HTTP servers/project consumers were closed through their stop-file lifecycle and the temporary isolated client configurations were removed. Saved fixture/evidence files remain under ignored build/temp directories. The core upgrade was committed and pushed to default branch `master` as `da33ce3`; client evidence is recorded in the documentation follow-up.
+
 ## Remaining release boundaries
 
 The user GUI at port 8080 still runs its earlier extension. Its open programs include unsaved dirty/read-only state that cannot simply be saved, so no forced close/restart, global installation or replacement of that state was performed. This does not block committing and pushing the reviewed source to the default branch.

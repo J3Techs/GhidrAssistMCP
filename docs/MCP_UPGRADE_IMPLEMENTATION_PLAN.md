@@ -317,7 +317,7 @@ Keep `return_code`, PORT provenance, basic queue/result bounds and thin client p
 - [x] WP09 VT names, filters and stable pages (native contract coverage)
 - [x] WP10 PORT ledger and persisted native/disposable HTTP workflow
 - [x] WP11 Post-mutation code and native deep-function workflow
-- [ ] WP12 Packages delivered; complete client acceptance matrix in client reports
+- [ ] WP12 Packages and core client workflows passed, including shared PORT visibility; broad spill/invocation acceptance remains in client reports
 - [ ] WP13 Integrated suite/archive/headless checks passed; user-GUI installation and external-service gates remain
 
 Checked entries represent the tested server/fixture scope described in final validation. Unchecked entries are remaining environment/client acceptance, not missing core implementation. Do not mark them complete by substituting a unit or headless fixture for actual client/GUI behavior.
