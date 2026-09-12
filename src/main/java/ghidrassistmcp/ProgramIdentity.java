@@ -1,6 +1,7 @@
 package ghidrassistmcp;
 
 import java.util.*;
+import ghidra.framework.protocol.ghidra.GhidraURL;
 import ghidra.program.model.listing.Program;
 
 /** Exact selectors shared by dispatch and diagnostics; display names must be unique. */
@@ -52,8 +53,15 @@ public final class ProgramIdentity {
     private static boolean matches(String selector, Program p) {
         if (selector.equals(p.getName()) || selector.equals(id(p))) return true;
         var file = p.getDomainFile();
-        return file != null && (selector.equals(file.getPathname())
-            || file.getLocalProjectURL(null) != null && selector.equals(file.getLocalProjectURL(null).toString())
-            || file.getSharedProjectURL(null) != null && selector.equals(file.getSharedProjectURL(null).toString()));
+        if (file == null) return false;
+        if (selector.equals(file.getPathname())) return true;
+        var localUrl = file.getLocalProjectURL(null);
+        if (localUrl != null && selector.equals(localUrl.toString())) return true;
+        // DomainFileProxy.getSharedProjectURL can connect to and disconnect from
+        // the repository. Never probe it while rejecting an unrelated local ID,
+        // project path or display name. Resolve an explicit remote alias once.
+        if (!GhidraURL.isServerURL(selector)) return false;
+        var sharedUrl = file.getSharedProjectURL(null);
+        return sharedUrl != null && selector.equals(sharedUrl.toString());
     }
 }
