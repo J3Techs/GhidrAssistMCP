@@ -5,7 +5,7 @@ import argparse, hashlib, io, json, pathlib, subprocess, zipfile, xml.etree.Elem
 def digest(data): return hashlib.sha256(data).hexdigest()
 def git_output(root, *args):
     try:
-        return subprocess.check_output(['git', *args], cwd=root, text=True, stderr=subprocess.STDOUT).strip()
+        return subprocess.check_output(['git', *args], cwd=root, text=True, stderr=subprocess.PIPE).strip()
     except (OSError, subprocess.CalledProcessError):
         return None
 def main():
@@ -32,7 +32,8 @@ def main():
             parts=pathlib.PurePosixPath(n).parts
             relative=parts[1:] if extension_root and parts and parts[0] == extension_root else parts
             if relative and (relative[0] in forbidden_roots or relative[0] == 'CLAUDE.md'): forbidden.append(n)
-        empty_entries=[n for n in names if n.endswith('/')]
+        empty_entries=[n for n in names if n.endswith('/') and
+                       not any(child.startswith(n) and not child.endswith('/') for child in names)]
         jars=[n for n in names if n.endswith('/lib/GhidrAssistMCP.jar')]
         if len(jars)!=1: raise ValueError('Expected one runtime JAR')
         jar=z.read(jars[0]); dependencies=[{'path':n,'sha256':digest(z.read(n))} for n in names if n.endswith('.jar')]

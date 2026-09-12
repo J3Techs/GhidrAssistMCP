@@ -28,26 +28,12 @@ public class GAMCPStartServerScript extends GhidraScript {
         String completionFile = null;
         String toolProfile = "default";
 
-        // Parse optional arguments: host=... port=... wait=true|false
-        String[] args = getScriptArgs();
-        validateWaitMode(args);
-        if (args != null) {
-            for (String arg : args) {
-                if (arg.startsWith("host=")) {
-                    host = arg.substring(5);
-                } else if (arg.startsWith("port=")) {
-                    try {
-                        port = Integer.parseInt(arg.substring(5));
-                    } catch (NumberFormatException e) {
-                        Msg.warn(this, "Invalid port argument, using default 8080");
-                    }
-                } else if (arg.startsWith("completion_file=")) {
-                    completionFile = arg.substring("completion_file=".length()).trim();
-                } else if (arg.startsWith("tool_profile=")) {
-                    toolProfile = arg.substring("tool_profile=".length()).trim();
-                }
-            }
-        }
+        // analyzeHeadless can pass either key=value or separate key value tokens.
+        ParsedArgs parsed = parseArguments(getScriptArgs());
+        host = parsed.host;
+        port = parsed.port;
+        completionFile = parsed.completionFile;
+        toolProfile = parsed.toolProfile;
 
         GhidrAssistMCPHeadlessServer mcpServer = GhidrAssistMCPHeadlessServer.getInstance();
 
@@ -67,9 +53,66 @@ public class GAMCPStartServerScript extends GhidraScript {
     }
 
     static void validateWaitMode(String[] args) {
-        if (args == null) return;
-        for (String arg : args) if (arg.startsWith("wait=") && !arg.equalsIgnoreCase("wait=true"))
-            throw new IllegalArgumentException("The headless launcher requires wait=true (the default) to retain its caller-owned project until all MCP workers stop");
+        parseArguments(args);
+    }
+
+    static ParsedArgs parseArguments(String[] args) {
+        ParsedArgs result = new ParsedArgs();
+        if (args == null) return result;
+        for (int i = 0; i < args.length; i++) {
+            String token = args[i];
+            if (token == null || token.isBlank()) continue;
+            int equals = token.indexOf('=');
+            String key = equals < 0 ? token : token.substring(0, equals);
+            String value = equals < 0 ? null : token.substring(equals + 1);
+            if (isKnownKey(key) && value == null) {
+                if (++i >= args.length || args[i] == null || args[i].isBlank() || isKnownKey(args[i]))
+                    throw missingValue(key);
+                value = args[i];
+            }
+            if (!isKnownKey(key)) continue; // preserve compatibility with launcher options we do not own
+            apply(result, key, value);
+        }
+        return result;
+    }
+
+    private static boolean isKnownKey(String key) {
+        return "host".equals(key) || "port".equals(key) || "wait".equals(key)
+            || "completion_file".equals(key) || "tool_profile".equals(key);
+    }
+
+    private static IllegalArgumentException missingValue(String key) {
+        return new IllegalArgumentException("Missing value for headless launcher option '" + key + "'; use " + key + "=value or '" + key + " value'");
+    }
+
+    private static void apply(ParsedArgs result, String key, String value) {
+        if (value == null || value.isBlank()) throw missingValue(key);
+        switch (key) {
+            case "host" -> result.host = value;
+            case "port" -> {
+                try {
+                    result.port = Integer.parseInt(value);
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException("Invalid port value '" + value + "'; expected 1-65535", e);
+                }
+                if (result.port < 1 || result.port > 65535)
+                    throw new IllegalArgumentException("Invalid port value '" + value + "'; expected 1-65535");
+            }
+            case "wait" -> {
+                if (!"true".equalsIgnoreCase(value))
+                    throw new IllegalArgumentException("The headless launcher requires wait=true (the default) to retain its caller-owned project until all MCP workers stop");
+            }
+            case "completion_file" -> result.completionFile = value.trim();
+            case "tool_profile" -> result.toolProfile = value.trim();
+            default -> { }
+        }
+    }
+
+    static final class ParsedArgs {
+        String host = "localhost";
+        int port = 8080;
+        String completionFile;
+        String toolProfile = "default";
     }
 
     private void waitUntilCancelled(GhidrAssistMCPHeadlessServer mcpServer, String completionFile) {
